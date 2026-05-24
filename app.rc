@@ -1,2 +1,6 @@
 #pragma code_page(65001)
 1 24 "app.manifest"
+// Note: the app icon (`assets/app.ico`) is embedded by `build.rs` only if
+// the file exists on disk, since it is generated on demand by
+// `cargo run --example gen_icon` and intentionally not required for the
+// crate to build (e.g. on a fresh checkout before the icon was generated).

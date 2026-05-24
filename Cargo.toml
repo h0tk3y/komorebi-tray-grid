@@ -40,6 +40,9 @@ features = [
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Used by `examples/gen_icon.rs` to write a multi-resolution `assets/app.ico`
+# from the in-process renderer. Not a runtime dependency.
+ico = "0.5"
 
 [build-dependencies]
 embed-resource = "3"
