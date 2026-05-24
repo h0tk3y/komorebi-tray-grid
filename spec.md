@@ -12,22 +12,32 @@ The indicators available are the following:
 * `i`-th workspace is non-empty - the square is filled with gray;
 * `i`-th workspace is empty - the square is not filled, i.e. has a transparent background.
 
-The app gets the status from komorebi window manager by subscribing to the events on the named
-pipe, as documented in `https://github.com/LGUG2Z/komorebi/blob/master/README.md`: it first creates
-a named pipe and then subscribes with `komorebic.exe subscribe-pipe <your pipe name>`.
-
-If the app needs the full state of the komorebi window manager, it queries it via command line,
-with `komorebic state`, and parses the resulting JSON, where workspaces are available per-monitor, under `monitors` / `elements[]` / `workspaces[]` (and each item in the array has
-`containers[]` that can be empty or non-empty). If there are fewer workspaces than the grid 
-can display, assume that the others are empty. The numbers to match the workspaces with the squares are implicit in the
-status, they are not in the output, the order sets them.
+The app gets the status from komorebi window manager by talking to komorebi's IPC directly, in-process, through the upstream Rust crates published by the komorebi project (see the **komorebi integration** requirement below). It subscribes to komorebi's event stream and parses the `State` payload that komorebi pushes on every notification (and that the app can also query on demand for initial seeding / reconnect). Workspaces are available per-monitor, under `monitors` / `elements[]` / `workspaces[]` (and each item in the array has `containers[]` that can be empty or non-empty). If there are fewer workspaces than the grid can display, assume that the others are empty. The numbers to match the workspaces with the squares are implicit in the status, they are not in the output, the order sets them.
 
 When there is more than one monitor, the app should show one tray icon per monitor, with the corresponding monitor's workspaces content in each icon. Every icon — whether there is one monitor or several — is decorated with a small outer border: the icon for the currently focused monitor uses the focused (blue) color so the active monitor can be told apart at a glance, and the icons for any inactive monitors use the non-empty (gray) color. With a single monitor the border is always drawn in the focused (blue) color, since that monitor is by definition the active one. This keeps the icon footprint uniform across single- and multi-monitor setups and makes the active highlight read as a state change rather than a size change.
 
 The app has an autostart feature that can be enabled or disabled in the 
 right-click menu on the tray icon. Each tray icon should show the same right-click menu.
 
-The app must survive komorebi restarts (`komorebic stop` followed by `komorebic start`) and resume live updates without user intervention. Because komorebi keeps its subscriber list only in memory, the app must re-subscribe on a fresh named pipe every reconnect attempt, observe the exit status of `komorebic subscribe-pipe` (never hang silently when komorebi is down), cap the wait for komorebi to open the pipe so a doomed subscription is recycled, back off between attempts to avoid spawn storms when komorebi is flapping, re-query `komorebic state` on every reconnect so the tray reflects reality before the first event, and spawn every `komorebic` subprocess without a console window.
+### komorebi integration
+
+The app must integrate with komorebi by depending on komorebi's own Rust crates (the `komorebi-client` crate, which transitively pulls in the rest of the upstream `komorebi` workspace) rather than by shelling out to `komorebic.exe`. The rationale is twofold: (a) wire-format and schema changes in komorebi (the `SocketMessage` enum, the `State`/`Notification` types, the set of override events, the socket path layout, etc.) are picked up by a `cargo update` instead of by silently breaking JSON parsing or CLI flag handling, and (b) the integration runs entirely in-process, with no per-event subprocess spawn, no console-window flashes, and no dependency on `komorebic.exe` being on `PATH` at run time.
+
+Concretely:
+* The dependency on the komorebi crates must be **pinned to an upstream release tag** (e.g. `tag = "v0.1.41"` in `Cargo.toml`), not to a floating branch or a bare git revision, so that builds are reproducible and an intentional human action is required to track a new komorebi release.
+* All komorebi IPC — subscribing for notifications, querying the full `State`, and any control messages the app needs to send — must go through the upstream types and helpers (`SocketMessage`, `subscribe`, `send_query`, `send_message`, …). The app must not parse JSON emitted by `komorebic.exe` or reimplement komorebi's socket-path / framing conventions by hand.
+* `komorebic.exe` is not required to be installed or on `PATH` at run time. (The komorebi service itself — i.e. the `komorebi.exe` daemon — is of course required; it owns the AF_UNIX control socket the app connects to.)
+
+### Surviving komorebi restarts
+
+The app must survive komorebi restarts (`komorebic stop` followed by `komorebic start`, an upgrade-in-place, or a crash-and-respawn) and resume live updates without user intervention and without the user having to restart the tray. Because komorebi keeps its subscriber registry only in process memory, our subscription is forgotten the moment the komorebi daemon exits — even if our listening socket is still bound on disk — so the app cannot rely on a passive listener to recover on its own.
+
+The app must therefore:
+* **Detect** that komorebi has gone down and come back up, on a timescale that feels responsive to the user (single-digit seconds), without busy-looping and without spamming komorebi or its other subscribers with traffic on every probe. In particular, a liveness check must not cause komorebi to broadcast state to *other* subscribers (yasb, komokana, …) — it must only touch komorebi's own connection-accept path.
+* **Re-register** the subscription with komorebi as soon as komorebi is reachable again, using a stable subscriber identity so the re-registration is idempotent (komorebi keys subscribers by name in a `HashMap`) and komorebi's registry doesn't grow on every reconnect.
+* **Re-seed the UI** after each reconnect so the tray reflects reality before the first post-restart event arrives, ideally by piggy-backing on whatever broadcast komorebi already emits as a side effect of (re-)registration rather than issuing a separate explicit state query.
+* **Not** rely on interrupting a blocking `accept()` on the subscription socket (there is no portable way to do that on Windows). Liveness detection must run independently of the accept loop.
+* **Back off gracefully** on hard errors (subscribe/send/accept failures) so a flapping komorebi cannot turn into a reconnect storm, and reset that back-off once a session has been healthy for long enough.
 
 ### Behavioral defaults
 
@@ -42,7 +52,7 @@ materially different product:
 * **"No such workspace" vs. empty workspace**: rendered identically (transparent cell). The icon does not visually distinguish "workspace exists but has no windows" from "this workspace index is beyond what komorebi reports".
 * **More than 9 workspaces**: cells 0..8 are rendered as usual; workspaces with index ≥ 9 are silently ignored.
 * **Single-instance scope is per-user**: the singleton guard must be scoped to the current Windows user session (e.g. `Local\…` mutex), so two different users on the same machine (RDP, fast user switching) can each run their own instance.
-* **Behavior when `komorebic` is unavailable**: the app keeps running and retries with the same backoff used for reconnect; it does *not* exit on first failure. This way, installing or starting komorebi later self-heals without restarting the app.
+* **Behavior when komorebi is unreachable at startup**: the app keeps running and retries with the same backoff used for reconnect; it does *not* exit on first failure. This way, installing or starting komorebi later self-heals without restarting the app.
 * **Left/double-click on tray icons**: no-ops. Only right-click shows the menu.
 * **`Quit` is global**: clicking `Quit` on any tray icon's menu terminates the whole process and removes every tray icon, not just the icon that was clicked.
 * **Menu state refresh**: the `Enable autostart` checkmark is refreshed from the registry every time the menu is about to be shown, so external changes (e.g. user editing the registry by hand) are reflected without restarting the app.

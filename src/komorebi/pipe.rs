@@ -1,108 +1,200 @@
-//! Async worker that subscribes to komorebi via a Windows named pipe and
-//! emits debounced [`WorldState`] snapshots over an mpsc channel.
+//! Worker that subscribes to komorebi via the [`komorebi_client`] IPC API
+//! and forwards [`WorldState`] snapshots over an mpsc channel.
 //!
-//! See the technical-design section of `plan.md` for the rationale; in short:
-//! we don't try to model every komorebi event variant — every event triggers
-//! a `komorebic state` re-query (coalesced with a ~50 ms debounce), which is
-//! the canonical source of truth and is robust to komorebi schema evolution.
+//! Protocol — important and not entirely obvious:
+//!
+//! - A subscriber binds an AF_UNIX listener at a known path under komorebi's
+//!   `DATA_DIR` (`%LOCALAPPDATA%\komorebi`) and registers it with
+//!   `SocketMessage::AddSubscriberSocket(name)` — that's what
+//!   [`komorebi_client::subscribe`] does in one shot.
+//! - **For every notification**, komorebi opens a brand-new
+//!   `UnixStream::connect(path)`, writes the JSON-serialized
+//!   `Notification { event, state }` payload, and **closes the stream**.
+//!   In other words: the subscriber sees one accepted connection per event,
+//!   not a long-lived NDJSON stream.
+//! - The notification carries the full `State` already, so we never need to
+//!   round-trip back to komorebi with `SocketMessage::State` on the steady-
+//!   state path. We still use it to seed the initial UI and to refresh after
+//!   a reconnect.
+//! - komorebi keys its subscriber registry by name (`HashMap<name, path>`),
+//!   so re-registering with the same name is idempotent. We use a stable,
+//!   per-PID name and a stable listener for the lifetime of the worker.
+//!
+//! ### Recovering from komorebi restarts
+//!
+//! komorebi keeps its `SUBSCRIPTION_SOCKETS` registry **in-process memory**
+//! and writes it nowhere — so when the user runs `komorebic stop && komorebic
+//! start` (or komorebi crashes and restarts), our subscription is forgotten
+//! the moment the daemon exits, even though our `UnixListener` is still
+//! bound to the same path on disk. There is no portable way to interrupt
+//! the blocking `UnixListener::accept` on Windows, so a passive listener
+//! can never notice that komorebi has gone away.
+//!
+//! Earlier attempts tried to be too clever: keep one long-lived listener for
+//! the lifetime of the worker and merely send `SocketMessage::AddSubscriberSocket`
+//! after each detected `down → up` transition. That doesn't actually work
+//! in practice — partly because of `accept()` not being interruptible (the
+//! worker can sit blocked on a doomed listener long after komorebi has come
+//! back), partly because there are edge cases (komorebi marking us stale
+//! and `remove_file`-ing our subscription path during its previous lifetime;
+//! the listener's underlying socket being in a weird state after the peer
+//! daemon crashed) where the listener is no longer wired up to anything on
+//! komorebi's side even after a clean `AddSubscriberSocket` round-trip.
+//!
+//! The current design uses the watchdog only to **trigger a full re-
+//! subscribe**, which is what komorebi-client itself does on first connect
+//! and is the only path we know works end-to-end:
+//!
+//!   1. A short-interval [`WATCHDOG_INTERVAL`] thread does a bare
+//!      `UnixStream::connect` to `komorebi.sock` and immediately drops the
+//!      stream. komorebi sees EOF on the next read and exits its per-conn
+//!      handler with no error log and (critically) **without going through
+//!      the `process_command` path, so no `notify_subscribers` broadcast is
+//!      triggered** — other subscribers (yasb, komokana, …) stay quiet.
+//!   2. The watchdog tracks `was_alive` (seeded from a real initial probe,
+//!      not assumed). On any `down → up` transition it:
+//!        a) sets a shared `restart` [`AtomicBool`], and
+//!        b) wakes the worker's blocked `accept()` by `UnixStream::connect`-
+//!           ing to **our own** subscription socket path. That accept-and-
+//!           empty-EOF is harmless — the worker reads zero bytes, checks the
+//!           `restart` flag, and bails out of [`subscribe_loop`] with a
+//!           [`SessionEnd::WatchdogTriggered`].
+//!   3. [`run_worker`] then re-runs [`komorebi_client::subscribe`], which
+//!      removes any stale socket file at our path, binds a fresh listener,
+//!      and sends `AddSubscriberSocket(name)` for us — bringing us back
+//!      into komorebi's `SUBSCRIPTION_SOCKETS` registry. komorebi
+//!      synchronously calls `notify_subscribers` for that message (it's
+//!      an "override event" in `komorebi/src/lib.rs`), which pushes the
+//!      current `State` to our brand-new listener, and we then also
+//!      explicitly call [`push_fresh_state`] as a belt-and-braces re-seed.
+//!   4. We deliberately treat `SessionEnd::WatchdogTriggered` as a *healthy*
+//!      termination: no exponential back-off, no "subscription error"
+//!      tracing. This keeps recovery near-instant once komorebi is back.
+//!
+//! A separate, older problem with this worker was that the previous design
+//! treated the per-notification EOF as "the subscription died" and applied
+//! exponential back-off before re-subscribing — that is what caused the
+//! multi-second latency users saw between komorebi events and tray-icon
+//! updates. We still `accept()` in a tight loop on the steady-state path.
 
-use std::time::Duration;
+use std::io::Read;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::windows::named_pipe::ServerOptions;
-use tokio::process::Command;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::time::{sleep, Instant};
+use komorebi_client::{send_query, subscribe, SocketMessage};
+use serde::Deserialize;
+use uds_windows::UnixStream;
 
 use crate::komorebi::{state::WorldState, types};
 
-/// Coalesce bursts of komorebi events into a single `komorebic state` query
-/// at most every `DEBOUNCE` window.
-const DEBOUNCE: Duration = Duration::from_millis(50);
-
-/// Initial delay between reconnect attempts when the pipe breaks.
+/// Initial delay between reconnect attempts when the subscription breaks.
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 
 /// Upper bound on the reconnect backoff delay.
 const BACKOFF_MAX: Duration = Duration::from_secs(10);
 
-/// A connection that stayed up at least this long is considered "healthy" —
+/// A session that stayed up at least this long is considered "healthy" —
 /// when it terminates, we reset the reconnect backoff to its minimum.
 const HEALTHY_SESSION: Duration = Duration::from_secs(5);
 
-/// Windows named-pipe path prefix (the part komorebic does *not* include in
-/// `subscribe-pipe <name>`).
-const PIPE_PREFIX: &str = r"\\.\pipe\";
+/// How often the watchdog probes komorebi's main socket and, when needed,
+/// triggers a re-subscribe. The interval is short to maximise the chance of
+/// catching the brief `komorebi.sock`-missing window between `komorebic
+/// stop` and `komorebic start` — at >1 s polling a fast restart can land
+/// entirely between two probes and we'd never see the down phase. The probe
+/// itself is a single AF_UNIX `connect` immediately followed by a `close`
+/// (no payload), which komorebi handles via its per-connection `read`
+/// hitting EOF — it does NOT reach `process_command` / `notify_subscribers`,
+/// so other subscribers see no extra traffic.
+const WATCHDOG_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Win32 `CREATE_NO_WINDOW` flag — suppresses the console window when this
-/// (windowed-subsystem) process spawns a console-subsystem subprocess such
-/// as `komorebic.exe`. Without this flag, every spawn would briefly flash
-/// (and pile up, if it loops) a black `cmd.exe`-style window.
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-/// Build a `tokio::process::Command` for `komorebic` that never shows a
-/// console window. All callers in this module **must** use this helper.
-fn komorebic(args: &[&str]) -> Command {
-    // tokio::process::Command exposes `creation_flags` natively on Windows;
-    // no need to import `std::os::windows::process::CommandExt`.
-    let mut cmd = Command::new("komorebic");
-    cmd.args(args);
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd.stdin(std::process::Stdio::null());
-    cmd
+/// Stable subscriber-socket name for this process. komorebi keys its
+/// in-memory subscriber registry by name, so re-`AddSubscriberSocket` calls
+/// with the same name are idempotent (`HashMap::insert`). Using a fixed
+/// per-PID leaf keeps the listener path stable across reconnects (no stale
+/// socket file accumulation) and survives komorebi restarts without
+/// leaking entries on komorebi's side.
+pub fn subscription_name() -> String {
+    format!("komorebi-tray-grid-{}.sock", std::process::id())
 }
 
-/// Build a unique pipe name for this process (komorebi appends its own path
-/// prefix, so we only need a process-unique suffix).
-pub fn unique_pipe_name() -> String {
-    let pid = std::process::id();
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let nonce = nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ u64::from(pid);
-    format!("komorebi-tray-grid-{pid}-{nonce:016x}")
+/// Full path of our subscriber socket, mirroring komorebi-client's
+/// `DATA_DIR.join(name)`. The watchdog needs this to **self-connect** in
+/// order to unblock the worker's `accept()` when triggering a re-subscribe.
+/// Returned as `Option` so the watchdog can degrade gracefully if
+/// `LOCALAPPDATA` is unset.
+fn subscriber_socket_path(name: &str) -> Option<PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA")?;
+    Some(PathBuf::from(local).join("komorebi").join(name))
 }
 
-/// Run the worker until the channel is closed by the consumer.
+/// Thin envelope that picks out only the `state` field of komorebi's
+/// `Notification` JSON. The `event` discriminant is intentionally ignored:
+/// we always rebuild [`WorldState`] from the full state snapshot, which is
+/// robust to komorebi schema evolution (new event variants would otherwise
+/// require keeping our deserializer in lockstep with komorebi).
+#[derive(Debug, Deserialize)]
+struct NotificationEnvelope {
+    #[serde(default)]
+    state: types::State,
+}
+
+/// Run the worker until the receiver is dropped by the consumer.
 ///
 /// The worker:
-/// 1. Sends an initial [`WorldState`] derived from `komorebic state`.
-/// 2. Creates a uniquely named Windows named pipe and registers it with
-///    `komorebic subscribe-pipe`.
-/// 3. Reads NDJSON events from the pipe. After every event (debounced) it
-///    re-runs `komorebic state` and sends a fresh [`WorldState`].
-/// 4. On EOF or any I/O error, reconnects with exponential backoff. The
-///    backoff is reset only when the previous session stayed alive for at
-///    least [`HEALTHY_SESSION`], so a flapping komorebi can never cause a
-///    spawn storm.
-pub async fn run_worker(tx: UnboundedSender<WorldState>) -> Result<()> {
+/// 1. Pushes an initial [`WorldState`] from `SocketMessage::State` so the
+///    tray reflects the current desktop on launch even before komorebi
+///    sends any notification.
+/// 2. Subscribes to komorebi notifications via a process-stable AF_UNIX
+///    socket name under komorebi's `DATA_DIR`.
+/// 3. `accept()`s notification connections in a loop; for each, reads the
+///    full JSON, extracts `state`, and forwards a fresh [`WorldState`].
+/// 4. On any `accept()` / `subscribe()` failure, reconnects with bounded
+///    exponential backoff. The backoff resets after a session that stayed
+///    alive for at least [`HEALTHY_SESSION`], so a flapping komorebi can
+///    never cause a spawn storm.
+pub fn run_worker(tx: Sender<WorldState>) -> Result<()> {
     // Seed the UI immediately so the user sees something even if komorebi is
-    // briefly unreachable. Failures here just get logged; the subscribe loop
-    // will try again later.
-    push_fresh_state(&tx).await;
+    // briefly unreachable. Query failures here just get logged; the subscribe
+    // loop will try again as soon as komorebi comes up.
+    if !push_fresh_state(&tx) {
+        return Ok(());
+    }
 
     let mut backoff = BACKOFF_MIN;
     loop {
-        if tx.is_closed() {
-            return Ok(());
-        }
-
         let started = Instant::now();
-        let outcome = subscribe_loop(&tx).await;
+        let outcome = subscribe_loop(&tx);
         let session = started.elapsed();
 
         match outcome {
-            Ok(()) => tracing::info!(
-                session_ms = session.as_millis() as u64,
-                "komorebi pipe peer disconnected; reconnecting",
-            ),
+            Ok(SessionEnd::ReceiverGone) => return Ok(()),
+            Ok(SessionEnd::WatchdogTriggered) => {
+                // Healthy controlled restart, not an error. Re-seed the UI
+                // and re-subscribe immediately with NO backoff: the user is
+                // staring at the tray waiting for it to catch up after
+                // `komorebic start`, and komorebi is already up by
+                // construction (that's what the watchdog detected).
+                tracing::info!(
+                    session_ms = session.as_millis() as u64,
+                    "komorebi restart detected; re-subscribing",
+                );
+                backoff = BACKOFF_MIN;
+                if !push_fresh_state(&tx) {
+                    return Ok(());
+                }
+                continue;
+            }
             Err(e) => tracing::warn!(
                 error = ?e,
                 session_ms = session.as_millis() as u64,
                 backoff_ms = backoff.as_millis() as u64,
-                "komorebi pipe worker error; backing off",
+                "komorebi subscription error; backing off",
             ),
         }
 
@@ -110,227 +202,301 @@ pub async fn run_worker(tx: UnboundedSender<WorldState>) -> Result<()> {
             backoff = BACKOFF_MIN;
         }
 
-        sleep(backoff).await;
+        thread::sleep(backoff);
         backoff = backoff.saturating_mul(2).min(BACKOFF_MAX);
 
-        // Re-sync via `komorebic state` *after* the backoff: even if the
-        // event pipe is broken, the UI should reflect the latest snapshot.
-        if tx.is_closed() {
+        // Re-sync *after* the backoff so the UI catches up once komorebi
+        // comes back, even before the first notification arrives. A send
+        // failure means the consumer is gone, so exit.
+        if !push_fresh_state(&tx) {
             return Ok(());
         }
-        push_fresh_state(&tx).await;
     }
 }
 
-async fn push_fresh_state(tx: &UnboundedSender<WorldState>) {
-    match fetch_state().await {
-        Ok(state) => {
-            let _ = tx.send(state);
-        }
-        Err(e) => tracing::warn!(error = ?e, "`komorebic state` failed"),
-    }
+/// Why a single [`subscribe_loop`] iteration returned.
+enum SessionEnd {
+    /// The state consumer dropped the receiver — the worker should exit.
+    ReceiverGone,
+    /// The watchdog detected a komorebi `down → up` transition and asked
+    /// the worker to tear down the current subscription so a fresh one can
+    /// be created via `komorebi_client::subscribe`. Treated as a *healthy*
+    /// session termination by [`run_worker`] (no backoff, no error log).
+    WatchdogTriggered,
 }
 
-/// How long we tolerate `komorebic` taking to finish a one-shot subprocess
-/// call (`subscribe-pipe`, `state`) before we treat the call as hung and
-/// recycle. Generous — `komorebic` is normally near-instantaneous.
-const KOMOREBIC_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// While waiting for komorebi to connect to a freshly-subscribed pipe, we
-/// poll `komorebic state` every `HEALTH_INTERVAL` to (a) detect that komorebi
-/// went away between subscription and its first event and (b) push a fresh
-/// snapshot so the UI doesn't go stale.
-const HEALTH_INTERVAL: Duration = Duration::from_secs(10);
-
-/// Hard ceiling on how long we wait for komorebi to open its end of the
-/// pipe after we subscribe. If no event arrives in this window, we recycle
-/// the subscription. This guards against the narrow race where
-/// `subscribe-pipe` registers us on a komorebi process that's about to die:
-/// the next `komorebic state` would succeed (it would talk to the *new*
-/// komorebi) yet our pipe would never receive a client. Re-subscribing on a
-/// fresh pipe is the only reliable recovery.
-const CONNECT_MAX_WAIT: Duration = Duration::from_secs(60);
-
-/// Inner loop: connect to komorebi once, read events until EOF or error, then
-/// return.
+/// Subscribe once, then `accept()` per-notification connections in a loop.
 ///
-/// Reconnection contract — every iteration of the outer `run_worker` loop
-/// goes through this function with a *brand new* pipe. That is critical:
-/// komorebi keeps its list of subscribers in-memory, so when komorebi
-/// restarts (`komorebic stop` / `komorebic start`) our previous subscription
-/// is gone. We re-register by calling `subscribe-pipe` again, and we MUST
-/// wait for it to finish and check its exit status — otherwise a failure
-/// (komorebi still down) goes unnoticed and the `server.connect()` below
-/// would hang forever, never giving the next attempt a chance.
-async fn subscribe_loop(tx: &UnboundedSender<WorldState>) -> Result<()> {
-    let pipe_name = unique_pipe_name();
-    let pipe_path = format!("{PIPE_PREFIX}{pipe_name}");
+/// Per the protocol described in the module docstring, each notification is
+/// delivered on a fresh, short-lived AF_UNIX stream. We must NOT treat the
+/// per-notification EOF as "subscription dropped" — that's what created the
+/// multi-second update lag in the previous implementation. The subscription
+/// is only torn down when `accept()` itself fails (e.g. the listener got
+/// unbound, or some unrecoverable OS-level error).
+fn subscribe_loop(state_tx: &Sender<WorldState>) -> Result<SessionEnd> {
+    let name = subscription_name();
+    tracing::debug!(socket = %name, "subscribing to komorebi");
 
-    let server = ServerOptions::new()
-        .first_pipe_instance(true)
-        .create(&pipe_path)
-        .with_context(|| format!("create named pipe {pipe_path}"))?;
+    let listener = subscribe(&name)
+        .with_context(|| format!("subscribe to komorebi (socket {name})"))?;
 
-    tracing::debug!(pipe = %pipe_name, "running `komorebic subscribe-pipe`");
-    run_subscribe_pipe(&pipe_name).await?;
-    tracing::debug!(pipe = %pipe_name, "subscribed; waiting for komorebi to connect");
+    tracing::debug!(socket = %name, "subscribed; awaiting notifications");
 
-    // Wait for komorebi to connect to the pipe. komorebi only opens the pipe
-    // when it has an event to deliver, which on an idle desktop can take a
-    // long time. Race `server.connect()` against a periodic health-check so
-    // we don't wait forever if komorebi disappeared right after subscribing.
-    //
-    // Wrapped in a scope so `connect_fut`'s borrow of `server` ends before
-    // we move `server` into the `BufReader` below.
-    {
-        let started = Instant::now();
-        let connect_fut = server.connect();
-        tokio::pin!(connect_fut);
-        loop {
-            if tx.is_closed() {
-                return Ok(());
-            }
-            if started.elapsed() >= CONNECT_MAX_WAIT {
-                tracing::debug!(
-                    waited_s = started.elapsed().as_secs(),
-                    "no client connected; recycling subscription"
-                );
-                return Ok(());
-            }
-            tokio::select! {
-                r = &mut connect_fut => {
-                    r.context("wait for komorebic to connect to the named pipe")?;
-                    break;
-                }
-                _ = sleep(HEALTH_INTERVAL) => {
-                    match tokio::time::timeout(KOMOREBIC_TIMEOUT, fetch_state()).await {
-                        Ok(Ok(state)) => {
-                            if tx.send(state).is_err() {
-                                return Ok(());
-                            }
-                        }
-                        Ok(Err(e)) => {
-                            anyhow::bail!(
-                                "komorebi appears unavailable while waiting for pipe connection: {e:#}"
-                            );
-                        }
-                        Err(_) => {
-                            anyhow::bail!(
-                                "`komorebic state` timed out while waiting for pipe connection"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-    tracing::debug!("komorebi connected to pipe");
-
-    let reader = BufReader::new(server);
-    let mut lines = reader.lines();
-
-    // Debounce: after an event, defer the state fetch by `DEBOUNCE`. If
-    // another event arrives during the wait, push the deadline forward.
-    let mut deadline: Option<Instant> = None;
+    // `restart` is shared with the watchdog. When set, the watchdog also
+    // self-connects to our subscriber socket to unblock the `accept()`
+    // below; the worker then sees the flag and bails out.
+    let restart = Arc::new(AtomicBool::new(false));
+    // Watchdog needs our own subscriber socket path to be able to wake the
+    // blocked `accept()` via a self-connect. The `WatchdogHandle::spawn`
+    // is what actually constructs it.
+    let _watchdog = WatchdogHandle::spawn(name.clone(), Arc::clone(&restart));
 
     loop {
-        if tx.is_closed() {
-            return Ok(());
+        // accept blocks until either komorebi pushes a notification or the
+        // watchdog self-connects to wake us up after detecting a restart.
+        // There is no portable way to interrupt a blocking
+        // `UnixListener::accept` on Windows; the watchdog's self-connect is
+        // the explicit wake-up mechanism.
+        let (mut stream, _addr) = listener
+            .accept()
+            .context("accept komorebi notification connection")?;
+
+        // Read until EOF — komorebi writes the JSON and closes the stream.
+        let mut buf = String::new();
+        if let Err(e) = stream.read_to_string(&mut buf) {
+            // Transient per-event read failure — log and keep the
+            // subscription alive; the next event will likely succeed.
+            tracing::warn!(error = ?e, "failed to read komorebi notification");
+            continue;
+        }
+        drop(stream);
+
+        // After every accepted connection, check whether the watchdog asked
+        // us to bail out. We do this regardless of payload size, because
+        // the watchdog's wake-up connect carries zero bytes and a legitimate
+        // notification may have raced ahead of the watchdog poke (e.g.
+        // komorebi already started broadcasting before we returned).
+        if restart.swap(false, Ordering::SeqCst) {
+            tracing::debug!(
+                "watchdog requested re-subscribe; tearing down current session",
+            );
+            return Ok(SessionEnd::WatchdogTriggered);
         }
 
-        let next = if let Some(d) = deadline {
-            let remaining = d.saturating_duration_since(Instant::now());
-            tokio::select! {
-                line = lines.next_line() => ReadOutcome::Line(line),
-                _ = sleep(remaining) => ReadOutcome::DebounceElapsed,
+        if buf.is_empty() {
+            // Spurious zero-byte connection (e.g. a stray probe). Ignore
+            // and wait for the next event.
+            continue;
+        }
+
+        tracing::trace!(bytes = buf.len(), "komorebi notification received");
+
+        let envelope: NotificationEnvelope = match serde_json::from_str(&buf) {
+            Ok(e) => e,
+            Err(e) => {
+                // Schema drift or partial write: fall back to a fresh state
+                // query so the UI doesn't go stale on a single bad message.
+                tracing::warn!(
+                    error = ?e,
+                    "failed to parse komorebi notification; falling back to state query",
+                );
+                if !push_fresh_state(state_tx) {
+                    return Ok(SessionEnd::ReceiverGone);
+                }
+                continue;
             }
-        } else {
-            ReadOutcome::Line(lines.next_line().await)
         };
 
-        match next {
-            ReadOutcome::DebounceElapsed => {
-                deadline = None;
-                match fetch_state().await {
-                    Ok(state) => {
-                        if tx.send(state).is_err() {
-                            return Ok(());
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "komorebic state failed mid-stream");
-                    }
-                }
-            }
-            ReadOutcome::Line(Ok(Some(line))) => {
-                tracing::trace!(bytes = line.len(), "komorebi event received");
-                deadline = Some(Instant::now() + DEBOUNCE);
-            }
-            ReadOutcome::Line(Ok(None)) => {
-                // EOF: komorebi closed its side of the pipe. Most likely it
-                // was stopped (`komorebic stop`) or crashed; the outer loop
-                // will back off and re-subscribe with a fresh pipe.
-                return Ok(());
-            }
-            ReadOutcome::Line(Err(e)) => {
-                return Err(anyhow::Error::from(e).context("read from komorebi pipe"));
-            }
+        let world = WorldState::from(&envelope.state);
+        if state_tx.send(world).is_err() {
+            return Ok(SessionEnd::ReceiverGone);
         }
     }
 }
 
-/// Run `komorebic subscribe-pipe <name>` and wait for it to finish.
+/// Send a fresh [`WorldState`] over `tx`. Returns `false` if the consumer
+/// dropped the receiver (and the worker should therefore exit).
+fn push_fresh_state(tx: &Sender<WorldState>) -> bool {
+    match fetch_state() {
+        Ok(state) => tx.send(state).is_ok(),
+        Err(e) => {
+            tracing::warn!(error = ?e, "komorebi state query failed");
+            // Query failures aren't fatal; keep the worker alive so it can
+            // retry on the next reconnect / notification.
+            true
+        }
+    }
+}
+
+/// Query komorebi for its current [`SocketMessage::State`] and project it
+/// into a [`WorldState`]. Used to seed the UI on startup and to refresh
+/// after a reconnect — never on the per-notification hot path.
+pub fn fetch_state() -> Result<WorldState> {
+    let raw = send_query(&SocketMessage::State)
+        .context("query komorebi state (is komorebi running?)")?;
+    let parsed: types::State =
+        serde_json::from_str(&raw).context("parse komorebi state JSON")?;
+    Ok(WorldState::from(&parsed))
+}
+
+/// Path to komorebi's main control socket. Mirrors
+/// `komorebi_client`'s internal `DATA_DIR.join("komorebi.sock")`, which
+/// resolves to `%LOCALAPPDATA%\komorebi\komorebi.sock` on Windows. Returned
+/// as `Option` so we can degrade gracefully if `LOCALAPPDATA` is somehow
+/// unset — in that case the watchdog disables itself rather than crashing.
+fn komorebi_socket_path() -> Option<PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA")?;
+    Some(PathBuf::from(local).join("komorebi").join("komorebi.sock"))
+}
+
+/// Liveness probe: open a TCP-like connect to komorebi's main socket and
+/// drop it immediately. komorebi accepts the connection, reads zero bytes
+/// (we never write), hits EOF, and exits its per-connection handler with
+/// no further work — in particular, it does **not** reach
+/// `process_command` / `notify_subscribers`, so other subscribers see no
+/// extra traffic.
+fn komorebi_is_alive(path: &PathBuf) -> bool {
+    match UnixStream::connect(path) {
+        Ok(stream) => {
+            // Be polite and don't sit in komorebi's read with no data:
+            // give it a tiny shutdown hint by dropping immediately.
+            drop(stream);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Owns the watchdog thread. On `Drop`, signals the thread to stop (by
+/// dropping the `Sender` half of the stop channel — the watchdog uses
+/// `recv_timeout`, so a disconnected channel breaks it out of its sleep
+/// immediately) and joins it.
+struct WatchdogHandle {
+    // `Option` so `Drop` can take the values out without `unsafe`.
+    stop_tx: Option<Sender<()>>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl WatchdogHandle {
+    fn spawn(subscription_name: String, restart: Arc<AtomicBool>) -> Self {
+        let socket_path = match komorebi_socket_path() {
+            Some(p) => p,
+            None => {
+                // No LOCALAPPDATA → degrade to no-op watchdog. The
+                // subscribe loop still works for as long as komorebi
+                // stays up; restart-recovery just won't happen.
+                tracing::warn!(
+                    "LOCALAPPDATA not set; komorebi-restart watchdog disabled",
+                );
+                return Self {
+                    stop_tx: None,
+                    join: None,
+                };
+            }
+        };
+        let our_socket_path = match subscriber_socket_path(&subscription_name) {
+            Some(p) => p,
+            None => {
+                tracing::warn!(
+                    "LOCALAPPDATA not set; komorebi-restart watchdog disabled",
+                );
+                return Self {
+                    stop_tx: None,
+                    join: None,
+                };
+            }
+        };
+
+        let (stop_tx, stop_rx) = channel::<()>();
+        let join = thread::Builder::new()
+            .name("komorebi-watchdog".into())
+            .spawn(move || {
+                watchdog_thread(socket_path, our_socket_path, restart, stop_rx)
+            })
+            .ok();
+
+        if join.is_none() {
+            tracing::warn!("failed to spawn komorebi-restart watchdog thread");
+        }
+
+        Self {
+            stop_tx: Some(stop_tx),
+            join,
+        }
+    }
+}
+
+impl Drop for WatchdogHandle {
+    fn drop(&mut self) {
+        // Dropping the sender disconnects the channel; the watchdog's
+        // `recv_timeout` returns `Disconnected` and the thread exits
+        // immediately, so the join below is essentially free.
+        drop(self.stop_tx.take());
+        if let Some(handle) = self.join.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// Watchdog body — see the module docstring for the rationale.
 ///
-/// This is a short-lived command: it sends an IPC message to komorebi
-/// asking it to register the given pipe in its in-memory subscriber list,
-/// then exits. The exit status is the only signal we get about whether the
-/// subscription actually took effect — so we MUST observe it. A non-zero
-/// exit almost always means komorebi is not running (yet).
-async fn run_subscribe_pipe(pipe_name: &str) -> Result<()> {
-    let status = tokio::time::timeout(
-        KOMOREBIC_TIMEOUT,
-        komorebic(&["subscribe-pipe", pipe_name])
-            .kill_on_drop(true)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status(),
-    )
-    .await
-    .context("`komorebic subscribe-pipe` timed out")?
-    .context("run `komorebic subscribe-pipe` (is komorebic on PATH?)")?;
+/// Probes komorebi's main socket on a tight interval and, on any
+/// `down → up` transition, asks the worker to tear down its current
+/// subscription and re-subscribe by:
+///   1. setting `restart` so the worker bails out of [`subscribe_loop`],
+///   2. self-connecting to our own subscriber socket so the worker's
+///      blocked `accept()` returns immediately with a zero-byte payload.
+fn watchdog_thread(
+    komorebi_socket: PathBuf,
+    our_subscriber_socket: PathBuf,
+    restart: Arc<AtomicBool>,
+    stop_rx: std::sync::mpsc::Receiver<()>,
+) {
+    // Seed `was_alive` from a **real** probe, not the optimistic assumption
+    // that subscribe just succeeded. This is important: a komorebi restart
+    // could land between our successful `subscribe` and the watchdog's
+    // first tick, and an optimistic seed would make us miss that transition
+    // entirely (we'd see only `true → true` forever).
+    let mut was_alive = komorebi_is_alive(&komorebi_socket);
+    loop {
+        match stop_rx.recv_timeout(WATCHDOG_INTERVAL) {
+            // Owner dropped the sender → session is shutting down.
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => return,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
 
-    if !status.success() {
-        anyhow::bail!(
-            "`komorebic subscribe-pipe` exited with {status} (is komorebi running?)"
-        );
+        let now_alive = komorebi_is_alive(&komorebi_socket);
+        match (was_alive, now_alive) {
+            (true, false) => {
+                tracing::info!(
+                    "komorebi appears to be down; will re-subscribe when it comes back",
+                );
+            }
+            (false, true) => {
+                tracing::info!(
+                    "komorebi is back up; triggering worker re-subscribe",
+                );
+                // 1) Tell the worker to bail out on its next accept().
+                restart.store(true, Ordering::SeqCst);
+                // 2) Wake the blocked accept() via a self-connect. Errors
+                //    here are not fatal — the worker may have already
+                //    woken on a real komorebi event and processed the
+                //    flag; or our listener may be in a transient state.
+                //    Either way, the next probe will reconfirm and the
+                //    `run_worker` loop will keep retrying.
+                match UnixStream::connect(&our_subscriber_socket) {
+                    Ok(stream) => drop(stream),
+                    Err(e) => tracing::debug!(
+                        error = ?e,
+                        path = %our_subscriber_socket.display(),
+                        "self-connect to wake worker failed; flag still set",
+                    ),
+                }
+            }
+            _ => {}
+        }
+        was_alive = now_alive;
     }
-    Ok(())
-}
-
-enum ReadOutcome {
-    Line(std::io::Result<Option<String>>),
-    DebounceElapsed,
-}
-
-/// Run `komorebic state` once and parse the JSON into a [`WorldState`].
-pub async fn fetch_state() -> Result<WorldState> {
-    let output = komorebic(&["state"])
-        .stderr(std::process::Stdio::null())
-        .output()
-        .await
-        .context("run `komorebic state` (is komorebic on PATH?)")?;
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "`komorebic state` exited with {}: {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let raw: types::State = serde_json::from_slice(&output.stdout)
-        .context("parse `komorebic state` JSON")?;
-    Ok(WorldState::from(&raw))
 }
 
 #[cfg(test)]
@@ -338,13 +504,109 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pipe_name_is_unique_and_well_formed() {
-        let a = unique_pipe_name();
-        let b = unique_pipe_name();
-        assert_ne!(a, b);
+    fn subscription_name_is_stable_and_well_formed() {
+        let a = subscription_name();
+        let b = subscription_name();
+        // Stable across calls — komorebi treats re-subscribe with the same
+        // name as idempotent, so reconnecting must not change the name.
+        assert_eq!(a, b);
         assert!(a.starts_with("komorebi-tray-grid-"));
-        // No backslashes; komorebic only takes the suffix.
+        assert!(a.ends_with(".sock"));
+        // komorebi joins the name with its DATA_DIR; the leaf must not
+        // contain path separators.
         assert!(!a.contains('\\'));
         assert!(!a.contains('/'));
+    }
+
+    #[test]
+    fn notification_envelope_parses_state_from_full_notification() {
+        // Shape mirrors `komorebi_client::Notification`: `{event, state}`.
+        // We only care about `state` and must tolerate any `event` shape.
+        let raw = r#"{
+            "event": { "WindowManager": { "FocusChange": {} } },
+            "state": {
+                "monitors": {
+                    "elements": [
+                        {
+                            "device_id": "DEV",
+                            "device": "dev",
+                            "name": "DISPLAY1",
+                            "workspaces": { "elements": [], "focused": 0 }
+                        }
+                    ],
+                    "focused": 0
+                },
+                "is_paused": false
+            }
+        }"#;
+        let env: NotificationEnvelope = serde_json::from_str(raw).unwrap();
+        assert_eq!(env.state.monitors.elements.len(), 1);
+        assert_eq!(env.state.monitors.elements[0].device_id, "DEV");
+    }
+
+    #[test]
+    fn notification_envelope_tolerates_unknown_event_variants() {
+        // New komorebi versions may add brand-new NotificationEvent variants;
+        // since we treat `event` as opaque (we don't deserialize it), we
+        // must NOT break on values we've never seen.
+        let raw = r#"{
+            "event": { "SomethingBrandNew": [1, 2, 3] },
+            "state": {}
+        }"#;
+        let env: NotificationEnvelope = serde_json::from_str(raw).unwrap();
+        assert!(env.state.monitors.elements.is_empty());
+    }
+
+    #[test]
+    fn komorebi_socket_path_is_under_localappdata_komorebi() {
+        // The watchdog uses this exact path; it must match komorebi-client's
+        // internal `DATA_DIR.join("komorebi.sock")` resolution on Windows.
+        // We don't assert on a specific drive letter (CI may differ) — just
+        // on the trailing components, which is what the bug class would
+        // affect.
+        let p = komorebi_socket_path().expect("LOCALAPPDATA must be set on Windows test hosts");
+        let s = p.to_string_lossy().to_string();
+        assert!(
+            s.ends_with(r"\komorebi\komorebi.sock"),
+            "unexpected socket path: {s}",
+        );
+    }
+
+    #[test]
+    fn watchdog_handle_drop_terminates_thread_promptly() {
+        // Spawn the watchdog (komorebi is almost certainly NOT running in
+        // tests, so `komorebi_is_alive` just returns false quickly each tick).
+        // Then drop the handle and verify the join completes well within
+        // `WATCHDOG_INTERVAL` — the channel-disconnect must wake the thread
+        // out of `recv_timeout`, not let it sit idle for the full interval.
+        let restart = Arc::new(AtomicBool::new(false));
+        let handle = WatchdogHandle::spawn(
+            "komorebi-tray-grid-test.sock".to_string(),
+            Arc::clone(&restart),
+        );
+        let started = Instant::now();
+        drop(handle);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < WATCHDOG_INTERVAL,
+            "watchdog drop took {elapsed:?}, expected < {WATCHDOG_INTERVAL:?}",
+        );
+        // The flag must remain unset: there was no `down → up` to detect
+        // (komorebi is not running in the test harness).
+        assert!(!restart.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn subscriber_socket_path_uses_data_dir_layout() {
+        // The watchdog's self-connect target must live in the same
+        // directory komorebi-client itself uses for subscriber sockets
+        // (`DATA_DIR.join(name)` == `%LOCALAPPDATA%\komorebi\<name>`).
+        let p = subscriber_socket_path("komorebi-tray-grid-test.sock")
+            .expect("LOCALAPPDATA must be set on Windows test hosts");
+        let s = p.to_string_lossy().to_string();
+        assert!(
+            s.ends_with(r"\komorebi\komorebi-tray-grid-test.sock"),
+            "unexpected subscriber socket path: {s}",
+        );
     }
 }

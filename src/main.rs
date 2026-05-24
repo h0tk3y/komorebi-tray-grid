@@ -4,11 +4,12 @@
 //! - the `tao` event loop (owns the OS message pump and the tray icons);
 //! - the `tray-icon` static event handlers (forwarded into the event loop
 //!   as [`UserEvent::TrayIcon`] / [`UserEvent::Menu`]);
-//! - a dedicated tokio thread running the komorebi pipe worker, with
-//!   another bridge thread forwarding `WorldState`s into
-//!   [`UserEvent::StateChanged`].
+//! - a dedicated worker thread running the `komorebi-client`-backed
+//!   subscription worker, with another bridge thread forwarding
+//!   `WorldState`s into [`UserEvent::StateChanged`].
 
 use std::process;
+use std::sync::mpsc;
 use std::thread;
 
 use anyhow::{Context, Result};
@@ -16,7 +17,6 @@ use tao::{
     event::{Event, StartCause},
     event_loop::{ControlFlow, EventLoopBuilder},
 };
-use tokio::sync::mpsc;
 use tray_icon::{menu::MenuEvent, TrayIconEvent};
 
 use komorebi_tray_grid::app::App;
@@ -68,10 +68,11 @@ fn run() -> Result<()> {
         }));
     }
 
-    // Spawn the komorebi worker on a dedicated single-threaded tokio
-    // runtime. We can't run tokio on the tao event-loop thread (that's a
-    // win32 message pump), so we bridge via an mpsc channel.
-    let (state_tx, state_rx) = mpsc::unbounded_channel();
+    // Spawn the komorebi worker on a dedicated OS thread. The worker uses
+    // the (synchronous) `komorebi-client` API directly; we can't call it
+    // from the tao event-loop thread (that's a win32 message pump), so we
+    // bridge worker → event-loop via a sync mpsc channel.
+    let (state_tx, state_rx) = mpsc::channel();
     spawn_komorebi_worker(state_tx).context("spawn komorebi worker thread")?;
     spawn_state_bridge(state_rx, proxy.clone())
         .context("spawn komorebi → event-loop bridge thread")?;
@@ -121,22 +122,12 @@ fn run() -> Result<()> {
 }
 
 fn spawn_komorebi_worker(
-    state_tx: mpsc::UnboundedSender<komorebi_tray_grid::komorebi::state::WorldState>,
+    state_tx: mpsc::Sender<komorebi_tray_grid::komorebi::state::WorldState>,
 ) -> Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("komorebi-worker".into())
         .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to build tokio runtime");
-                    return;
-                }
-            };
-            if let Err(e) = rt.block_on(run_worker(state_tx)) {
+            if let Err(e) = run_worker(state_tx) {
                 tracing::error!(error = ?e, "komorebi worker exited with error");
             }
         })
@@ -144,15 +135,13 @@ fn spawn_komorebi_worker(
 }
 
 fn spawn_state_bridge(
-    mut state_rx: mpsc::UnboundedReceiver<
-        komorebi_tray_grid::komorebi::state::WorldState,
-    >,
+    state_rx: mpsc::Receiver<komorebi_tray_grid::komorebi::state::WorldState>,
     proxy: tao::event_loop::EventLoopProxy<UserEvent>,
 ) -> Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("komorebi-state-bridge".into())
         .spawn(move || {
-            while let Some(state) = state_rx.blocking_recv() {
+            while let Ok(state) = state_rx.recv() {
                 if proxy
                     .send_event(UserEvent::StateChanged(state))
                     .is_err()

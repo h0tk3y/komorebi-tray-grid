@@ -83,9 +83,9 @@ cargo packager --release
 
 The resulting `komorebi-tray-grid_<version>_x64-setup.exe` lands in
 `target\packager\`. The installer is **per-user only** (`%LOCALAPPDATA%\Programs\…`,
-no UAC elevation): the app communicates with komorebi over a named pipe at the
-user's integrity level, and an elevated install would auto-launch the app with
-a High-IL token that komorebi (Medium-IL) cannot write events into.
+no UAC elevation): the app communicates with komorebi over an AF_UNIX socket at
+the user's integrity level, and an elevated install would auto-launch the app
+with a High-IL token that komorebi (Medium-IL) cannot write events into.
 
 Installer settings live under `[package.metadata.packager]` in
 [`Cargo.toml`](Cargo.toml); to additionally build a `.msi`, add
@@ -93,22 +93,23 @@ Installer settings live under `[package.metadata.packager]` in
 
 ## Run
 
-`komorebi` and `komorebic.exe` must be installed and reachable on `PATH`. Start komorebi as usual,
-then launch:
+`komorebi` must be installed and running. Start komorebi as usual, then launch:
 
 ```powershell
 .\target\release\komorebi-tray-grid.exe
 ```
 
-The app:
+The app talks to komorebi directly over its AF_UNIX socket via the
+[`komorebi-client`](https://github.com/LGUG2Z/komorebi/tree/master/komorebi-client) crate, so
+`komorebic.exe` doesn't need to be on `PATH`. On startup it:
 
 1. Acquires a `Global\komorebi-tray-grid` named mutex so only one instance can run.
-2. Creates a uniquely named Windows named pipe and registers it with
-   `komorebic subscribe-pipe <name>`.
-3. Calls `komorebic state` to seed the initial state.
-4. Adds one tray icon per monitor reported by komorebi and updates it on every event,
-   coalescing bursts (~50 ms debounce).
-5. If the pipe breaks, re-subscribes with exponential backoff and re-queries `komorebic state`.
+2. Queries `SocketMessage::State` to seed the initial UI.
+3. Calls `komorebi_client::subscribe(<unique name>)` to register a per-process subscriber
+   socket under `%LOCALAPPDATA%\komorebi\`.
+4. Adds one tray icon per monitor reported by komorebi and updates it on every notification,
+   coalescing bursts (~50 ms debounce) into a fresh `State` query.
+5. If the subscription breaks, re-subscribes with exponential backoff and re-queries state.
 
 Logs go to stderr; the log level can be tuned with `KOMOREBI_TRAY_LOG`, e.g.
 `$env:KOMOREBI_TRAY_LOG = "debug"`.
