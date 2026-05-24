@@ -59,6 +59,17 @@ fn main() -> anyhow::Result<()> {
     icon.write(file)?;
 
     println!("wrote {} ({} sizes)", out_path.display(), SIZES.len());
+
+    let png_path = out_dir.join("../docs/icon.png");
+    image::save_buffer(
+        &png_path,
+        &base,
+        ICON_SIZE,
+        ICON_SIZE,
+        image::ExtendedColorType::Rgba8,
+    )?;
+    println!("wrote {}", png_path.display());
+
     Ok(())
 }
 

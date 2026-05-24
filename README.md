@@ -1,4 +1,4 @@
-# komorebi-tray-grid
+# <img src="docs/icon.png" width="32" height="32" alt="komorebi-tray-grid app icon: a small square grid of nine cells arranged in three rows and three columns, with the top-left cell filled in bright blue and the remaining cells empty, set against a transparent background, conveying a clean and minimal technical style"> komorebi-tray-grid
 
 A tiny Windows system-tray indicator for the [komorebi](https://github.com/LGUG2Z/komorebi) tiling
 window manager. Each tray icon is a 3×3 grid that mirrors the state of the nine workspaces on a
@@ -60,13 +60,13 @@ icon, and the same file is used by the NSIS installer (see below). It is generat
 on demand from the in-process renderer so it always matches the tray's visual style:
 
 ```powershell
-# Regenerate assets\app.ico (multi-resolution: 16/32/48/64/128/256).
+# Regenerate assets\app.ico and docs\icon.png.
 cargo run --example gen_icon
 ```
 
-The file is committed to the repository, so a fresh checkout builds without
+The files are committed to the repository, so a fresh checkout builds without
 running this step first; build still works (without an icon) even if you
-delete `assets\app.ico`.
+delete `assets\app.ico` and `docs\icon.png`.
 
 ### Windows installer
 
