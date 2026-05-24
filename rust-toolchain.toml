@@ -1,0 +1,8 @@
+[toolchain]
+# Pinned to a recent stable that supports the `edition2024` Cargo feature
+# (stabilized in 1.85). 1.90+ is required by several transitive deps
+# (e.g. `idna_adapter` >= 1.2 brought in by `url`/`tao` -> ICU).
+channel = "1.90.0"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-pc-windows-msvc"]
+profile = "minimal"

@@ -1,0 +1,57 @@
+{
+  "monitors": {
+    "elements": [
+      {
+        "device_id": "MON-A",
+        "device": "MonA",
+        "name": "DISPLAY1",
+        "workspaces": {
+          "elements": [
+            {
+              "containers": { "elements": [{ "id": "x" }], "focused": 0 },
+              "floating_windows": { "elements": [], "focused": 0 },
+              "monocle_container": null,
+              "maximized_window": null
+            },
+            {
+              "containers": { "elements": [], "focused": 0 },
+              "floating_windows": { "elements": [], "focused": 0 },
+              "monocle_container": null,
+              "maximized_window": null
+            }
+          ],
+          "focused": 0
+        }
+      },
+      {
+        "device_id": "MON-B",
+        "device": "MonB",
+        "name": "DISPLAY2",
+        "workspaces": {
+          "elements": [
+            {
+              "containers": { "elements": [], "focused": 0 },
+              "floating_windows": { "elements": [], "focused": 0 },
+              "monocle_container": null,
+              "maximized_window": null
+            },
+            {
+              "containers": { "elements": [{ "id": "y" }], "focused": 0 },
+              "floating_windows": { "elements": [], "focused": 0 },
+              "monocle_container": null,
+              "maximized_window": null
+            },
+            {
+              "containers": { "elements": [{ "id": "z" }], "focused": 0 },
+              "floating_windows": { "elements": [], "focused": 0 },
+              "monocle_container": null,
+              "maximized_window": null
+            }
+          ],
+          "focused": 1
+        }
+      }
+    ],
+    "focused": 1
+  }
+}

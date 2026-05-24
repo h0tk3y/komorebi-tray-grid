@@ -1,0 +1,53 @@
+{
+  "monitors": {
+    "elements": [
+      {
+        "id": 65537,
+        "name": "DISPLAY1",
+        "device": "Generic_Monitor",
+        "device_id": "Generic_Monitor-1&abcdef&0&UID256",
+        "serial_number_id": "SERIAL1",
+        "workspaces": {
+          "elements": [
+            {
+              "name": "1",
+              "containers": {
+                "elements": [
+                  { "id": "ctn-a", "windows": { "elements": [{ "hwnd": 1 }], "focused": 0 } }
+                ],
+                "focused": 0
+              },
+              "floating_windows": { "elements": [], "focused": 0 },
+              "monocle_container": null,
+              "maximized_window": null
+            },
+            {
+              "name": "2",
+              "containers": {
+                "elements": [
+                  { "id": "ctn-b", "windows": { "elements": [{ "hwnd": 2 }], "focused": 0 } },
+                  { "id": "ctn-c", "windows": { "elements": [{ "hwnd": 3 }], "focused": 0 } }
+                ],
+                "focused": 0
+              },
+              "floating_windows": { "elements": [], "focused": 0 },
+              "monocle_container": null,
+              "maximized_window": null
+            },
+            {
+              "name": "3",
+              "containers": { "elements": [], "focused": 0 },
+              "floating_windows": { "elements": [], "focused": 0 },
+              "monocle_container": null,
+              "maximized_window": null
+            }
+          ],
+          "focused": 1
+        }
+      }
+    ],
+    "focused": 0
+  },
+  "is_paused": false,
+  "resize_delta": 50
+}

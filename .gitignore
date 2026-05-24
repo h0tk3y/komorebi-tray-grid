@@ -1,0 +1,18 @@
+# Rust / Cargo
+/target/
+**/*.rs.bk
+
+# IDE / editor
+/.idea/
+/.vscode/
+*.iml
+
+# OS junk
+Thumbs.db
+.DS_Store
+
+# Local logs
+*.log
+
+# Junie agent session state and plans (not source-of-truth; see plan.md / spec.md)
+/.junie/

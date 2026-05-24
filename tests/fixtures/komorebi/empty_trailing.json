@@ -1,0 +1,27 @@
+{
+  "monitors": {
+    "elements": [
+      {
+        "device_id": "TRAIL-MON",
+        "workspaces": {
+          "elements": [
+            {
+              "containers": { "elements": [{ "id": "a" }], "focused": 0 },
+              "floating_windows": { "elements": [], "focused": 0 },
+              "monocle_container": null,
+              "maximized_window": null
+            },
+            {
+              "containers": { "elements": [{ "id": "b" }], "focused": 0 },
+              "floating_windows": { "elements": [], "focused": 0 },
+              "monocle_container": null,
+              "maximized_window": null
+            }
+          ],
+          "focused": 0
+        }
+      }
+    ],
+    "focused": 0
+  }
+}
