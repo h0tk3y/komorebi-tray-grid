@@ -44,12 +44,16 @@ impl TrayManager {
     pub fn reconcile(&mut self, world: &WorldState) -> Result<()> {
         let mut seen: HashSet<String> = HashSet::new();
 
-        // Every icon gets an outer border for a uniform footprint across
-        // single- and multi-monitor setups: blue on the active monitor,
-        // gray on the inactive ones — see `render::paint_monitor_border`.
-        // On a single-monitor setup the only icon is by definition active
-        // and thus gets the blue border.
-        for monitor in &world.monitors {
+        // Stable creation order: sort by monitor ID. This ensures that even
+        // if komorebi reports monitors in a different order (or if some are
+        // added/removed), each monitor's tray icon gets a stable internal ID
+        // (uID) in Windows. Combined with a stable executable path, this
+        // helps Windows persist the user's visibility preferences (e.g.
+        // "always show") across app restarts.
+        let mut monitors = world.monitors.clone();
+        monitors.sort_by(|a, b| a.id.cmp(&b.id));
+
+        for monitor in &monitors {
             seen.insert(monitor.id.clone());
             self.upsert(monitor, monitor.active)
                 .with_context(|| format!("update tray icon for monitor {}", monitor.id))?;
@@ -80,7 +84,9 @@ impl TrayManager {
             return Ok(());
         }
 
+        let id = format!("komorebi-tray-grid-{}", monitor.id);
         let tray = TrayIconBuilder::new()
+            .with_id(id)
             .with_menu(Box::new(self.menu.clone()))
             .with_tooltip(tooltip)
             .with_icon(icon)
