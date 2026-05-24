@@ -35,34 +35,70 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build (release)
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc
-
       - name: Run tests
-        run: cargo test --release --locked --target x86_64-pc-windows-msvc
+        run: cargo test --release --locked
 
-      - name: Stage artifact
+      - name: Generate app icon
+        # The `.ico` is produced by an in-tree example so the installer's
+        # banner and the exe's Explorer icon are derived from the same
+        # rasterizer the tray uses at runtime. This also forces a release
+        # build of the binary, populating the cache for the packager step.
+        run: cargo run --release --locked --example gen_icon
+
+      - name: Build (release)
+        # Explicit build so the portable-zip step has the exe to copy and
+        # so `cargo packager` only re-checks an up-to-date build.
+        run: cargo build --release --locked
+
+      - name: Stage portable artifact
         shell: pwsh
         run: |
           $stage = "dist/komorebi-tray-grid"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "target/x86_64-pc-windows-msvc/release/komorebi-tray-grid.exe" "$stage/"
+          Copy-Item "target/release/komorebi-tray-grid.exe" "$stage/"
           Copy-Item "README.md" "$stage/" -ErrorAction SilentlyContinue
           Copy-Item "spec.md"   "$stage/" -ErrorAction SilentlyContinue
           Compress-Archive -Path "$stage/*" -DestinationPath "dist/komorebi-tray-grid-windows-x86_64.zip" -Force
 
-      - name: Upload build artifact
+      - name: Install cargo-packager
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-packager@0.11
+
+      - name: Build NSIS installer
+        # `cargo-packager` runs its own `beforePackagingCommand` (`cargo
+        # build --release --locked`) which reuses the cache from the
+        # earlier build step. The produced `.exe` lands in `target/packager/`.
+        run: cargo packager --release --formats nsis
+
+      - name: Stage installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "target/packager" -Filter "*-setup.exe" | Select-Object -First 1
+          if (-not $installer) { throw "no installer produced under target/packager" }
+          Copy-Item $installer.FullName "dist/$($installer.Name)"
+
+      - name: Upload portable artifact
         uses: actions/upload-artifact@v4
         with:
           name: komorebi-tray-grid-windows-x86_64
           path: dist/komorebi-tray-grid-windows-x86_64.zip
           if-no-files-found: error
 
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: komorebi-tray-grid-windows-x86_64-installer
+          path: dist/*-setup.exe
+          if-no-files-found: error
+
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/komorebi-tray-grid-windows-x86_64.zip
+          files: |
+            dist/komorebi-tray-grid-windows-x86_64.zip
+            dist/*-setup.exe
           draft: false
           prerelease: false
           fail_on_unmatched_files: true

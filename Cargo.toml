@@ -53,3 +53,50 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# ---------------------------------------------------------------------------
+# Windows installer / portable package, built via `cargo packager --release`.
+#
+#   cargo install cargo-packager --locked
+#   cargo packager --release
+#
+# Produces an NSIS installer (`*.exe`) under `target/release/` (NSIS lets the
+# end user pick per-user vs. per-machine install at runtime). The CLI honors
+# `beforePackagingCommand` to compile a release binary first, so a bare
+# `cargo packager --release` is enough — see `release.yml` for the CI flow.
+# ---------------------------------------------------------------------------
+[package.metadata.packager]
+productName = "Komorebi Tray Grid"
+identifier = "dev.h0tk3y.komorebi-tray-grid"
+description = "System tray indicator for the komorebi tiling window manager."
+longDescription = """
+Komorebi Tray Grid is a tiny Windows tray app that visualizes the state of \
+the komorebi tiling window manager as a 3×3 grid icon (one per monitor), \
+with a right-click menu to toggle Windows logon autostart.
+"""
+publisher = "h0tk3y"
+homepage = "https://github.com/h0tk3y/komorebi-tray-grid"
+copyright = "Copyright © h0tk3y"
+category = "Utility"
+formats = ["nsis"]
+icons = ["assets/app.ico"]
+# Compile the binary that NSIS will then wrap. The packager picks up the
+# resulting exe from `binariesDir` (`target/release/`) via the `binaries`
+# entry below; the produced installer lands in `outDir` (`target/packager/`).
+beforePackagingCommand = "cargo build --release --locked"
+out-dir = "target/packager"
+binariesDir = "target/release"
+
+[[package.metadata.packager.binaries]]
+path = "komorebi-tray-grid"
+main = true
+
+[package.metadata.packager.nsis]
+# Per-user install only. The app talks to komorebi via a named pipe and
+# komorebi runs at the user's medium integrity level; if we let NSIS run
+# elevated (per-machine install) and auto-launch the app afterwards, the
+# app inherits a High-IL token and komorebi can no longer write events
+# into our pipe (only the initial `komorebic state` snapshot works). A
+# per-user install (`%LOCALAPPDATA%\Programs\…`) avoids elevation entirely
+# and matches the existing HKCU autostart model.
+installMode = "currentUser"

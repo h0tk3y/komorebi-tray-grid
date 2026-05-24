@@ -49,6 +49,44 @@ cargo test --locked
 
 The release binary lands at `target\release\komorebi-tray-grid.exe`.
 
+### App icon
+
+The Windows resource compiler embeds `assets\app.ico` as the exe's Explorer / Alt-Tab
+icon, and the same file is used by the NSIS installer (see below). It is generated
+on demand from the in-process renderer so it always matches the tray's visual style:
+
+```powershell
+# Regenerate assets\app.ico (multi-resolution: 16/32/48/64/128/256).
+cargo run --example gen_icon
+```
+
+The file is committed to the repository, so a fresh checkout builds without
+running this step first; build still works (without an icon) even if you
+delete `assets\app.ico`.
+
+### Windows installer
+
+A signed-able NSIS installer can be built with
+[`cargo-packager`](https://github.com/crabnebula-dev/cargo-packager):
+
+```powershell
+# One-time setup
+cargo install cargo-packager --locked
+
+# Build the installer (.exe). Runs `cargo build --release --locked` internally.
+cargo packager --release
+```
+
+The resulting `komorebi-tray-grid_<version>_x64-setup.exe` lands in
+`target\packager\`. The installer is **per-user only** (`%LOCALAPPDATA%\Programs\…`,
+no UAC elevation): the app communicates with komorebi over a named pipe at the
+user's integrity level, and an elevated install would auto-launch the app with
+a High-IL token that komorebi (Medium-IL) cannot write events into.
+
+Installer settings live under `[package.metadata.packager]` in
+[`Cargo.toml`](Cargo.toml); to additionally build a `.msi`, add
+`"wix"` to the `formats` array.
+
 ## Run
 
 `komorebi` and `komorebic.exe` must be installed and reachable on `PATH`. Start komorebi as usual,
@@ -75,4 +113,5 @@ Logs go to stderr; the log level can be tuned with `KOMOREBI_TRAY_LOG`, e.g.
 
 Tagged pushes (`v*`) trigger
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds on
-`windows-latest`, runs tests, and uploads a zipped portable `.exe` as a release asset.
+`windows-latest`, runs tests, and uploads both a zipped portable `.exe` and the
+NSIS `*-setup.exe` installer as release assets.
