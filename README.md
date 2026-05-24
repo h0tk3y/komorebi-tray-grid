@@ -4,6 +4,8 @@ A tiny Windows system-tray indicator for the [komorebi](https://github.com/LGUG2
 window manager. Each tray icon is a 3×3 grid that mirrors the state of the nine workspaces on a
 single monitor; when multiple monitors are connected, one tray icon is created per monitor.
 
+![komorebi-tray-grid in the Windows system tray](docs/tray-screenshot.jpg)
+
 Per-cell visuals:
 
 | Cell state                                  | Appearance                                   |
@@ -23,9 +25,11 @@ See [`spec.md`](spec.md) for the original spec and [`plan.md`](plan.md) for the 
 
 ## Status
 
-⚠️ Work in progress. The repository is currently at the Step 1 scaffold (buildable empty binary).
-Subsequent delivery steps add the renderer, the komorebi event worker, the tray UI, the
-autostart toggle, and the single-instance guard.
+Early but functional. The MVP described in [`spec.md`](spec.md) is implemented end-to-end —
+renderer, komorebi event worker, per-monitor tray icons, right-click menu with the autostart
+toggle, single-instance guard, and a CI-built NSIS installer — and tagged as `v0.1.0`. See the
+[releases page](https://github.com/h0tk3y/komorebi-tray-grid/releases) for prebuilt binaries.
+Expect rough edges; bug reports and PRs are welcome.
 
 ## Build
 
@@ -110,6 +114,9 @@ Logs go to stderr; the log level can be tuned with `KOMOREBI_TRAY_LOG`, e.g.
 `$env:KOMOREBI_TRAY_LOG = "debug"`.
 
 ## Releases
+
+Prebuilt binaries are published on the
+[GitHub releases page](https://github.com/h0tk3y/komorebi-tray-grid/releases).
 
 Tagged pushes (`v*`) trigger
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which builds on
