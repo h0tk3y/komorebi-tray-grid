@@ -115,12 +115,18 @@ const WATCHDOG_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Stable subscriber-socket name for this process. komorebi keys its
 /// in-memory subscriber registry by name, so re-`AddSubscriberSocket` calls
-/// with the same name are idempotent (`HashMap::insert`). Using a fixed
-/// per-PID leaf keeps the listener path stable across reconnects (no stale
-/// socket file accumulation) and survives komorebi restarts without
-/// leaking entries on komorebi's side.
+/// with the same name are idempotent (`HashMap::insert`).
+///
+/// We use a **fixed name** (not including the PID) because:
+/// 1. Our app has a single-instance guard, so there is only ever one
+///    legitimate instance running.
+/// 2. If we crash/restart, we want to overwrite the old entry in komorebi
+///    rather than leaving an "orphaned" entry. Orphaned entries in komorebi
+///    can become "poison": if they are connectable but not writable, they
+///    can block or break notifications for all subsequent subscribers in
+///    komorebi's sequential notification loop.
 pub fn subscription_name() -> String {
-    format!("komorebi-tray-grid-{}.sock", std::process::id())
+    "komorebi-tray-grid.sock".to_string()
 }
 
 /// Full path of our subscriber socket, mirroring komorebi-client's
@@ -260,6 +266,12 @@ fn subscribe_loop(state_tx: &Sender<WorldState>) -> Result<SessionEnd> {
         let (mut stream, _addr) = listener
             .accept()
             .context("accept komorebi notification connection")?;
+
+        // Defensive: never let a hanging connection block our worker (and
+        // thus potentially hang komorebi's sequential notification loop).
+        // Since komorebi writes the full notification in one go and then
+        // closes the stream, a few seconds is plenty.
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
 
         // Read until EOF — komorebi writes the JSON and closes the stream.
         let mut buf = String::new();
@@ -510,8 +522,7 @@ mod tests {
         // Stable across calls — komorebi treats re-subscribe with the same
         // name as idempotent, so reconnecting must not change the name.
         assert_eq!(a, b);
-        assert!(a.starts_with("komorebi-tray-grid-"));
-        assert!(a.ends_with(".sock"));
+        assert_eq!(a, "komorebi-tray-grid.sock");
         // komorebi joins the name with its DATA_DIR; the leaf must not
         // contain path separators.
         assert!(!a.contains('\\'));

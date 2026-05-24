@@ -21,11 +21,12 @@ right-click menu on the tray icon. Each tray icon should show the same right-cli
 
 ### komorebi integration
 
-The app must integrate with komorebi by depending on komorebi's own Rust crates (the `komorebi-client` crate, which transitively pulls in the rest of the upstream `komorebi` workspace) rather than by shelling out to `komorebic.exe`. The rationale is twofold: (a) wire-format and schema changes in komorebi (the `SocketMessage` enum, the `State`/`Notification` types, the set of override events, the socket path layout, etc.) are picked up by a `cargo update` instead of by silently breaking JSON parsing or CLI flag handling, and (b) the integration runs entirely in-process, with no per-event subprocess spawn, no console-window flashes, and no dependency on `komorebic.exe` being on `PATH` at run time.
+The app must integrate with komorebi by depending on komorebi's own Rust crates (the `komorebi-client` crate, which transitively pulls in the rest of the upstream `komorebi` workspace) rather than by shelling out to `komorebic.exe`. The rationale is threefold: (a) wire-format and schema changes in komorebi (the `SocketMessage` enum, the `State`/`Notification` types, the set of override events, the socket path layout, etc.) are picked up by a `cargo update` instead of by silently breaking JSON parsing or CLI flag handling, (b) the integration runs entirely in-process, with no per-event subprocess spawn, no console-window flashes, and no dependency on `komorebic.exe` being on `PATH` at run time, and (c) by using a fixed, stable subscriber identity (e.g. `komorebi-tray-grid.sock`) that is overwritten on every launch/re-subscribe, we avoid polluting komorebi's in-memory subscriber registry with "orphaned" entries that could otherwise become poison if they become unresponsive.
 
 Concretely:
 * The dependency on the komorebi crates must be **pinned to an upstream release tag** (e.g. `tag = "v0.1.41"` in `Cargo.toml`), not to a floating branch or a bare git revision, so that builds are reproducible and an intentional human action is required to track a new komorebi release.
 * All komorebi IPC — subscribing for notifications, querying the full `State`, and any control messages the app needs to send — must go through the upstream types and helpers (`SocketMessage`, `subscribe`, `send_query`, `send_message`, …). The app must not parse JSON emitted by `komorebic.exe` or reimplement komorebi's socket-path / framing conventions by hand.
+* **Stable subscriber identity**: The app must use a fixed name for its subscription socket that is stable across restarts. It must not include the PID or other transient values in the name. This ensures that any previous entry for the app in komorebi's memory is replaced rather than duplicated.
 * `komorebic.exe` is not required to be installed or on `PATH` at run time. (The komorebi service itself — i.e. the `komorebi.exe` daemon — is of course required; it owns the AF_UNIX control socket the app connects to.)
 
 ### Surviving komorebi restarts
@@ -38,6 +39,7 @@ The app must therefore:
 * **Re-seed the UI** after each reconnect so the tray reflects reality before the first post-restart event arrives, ideally by piggy-backing on whatever broadcast komorebi already emits as a side effect of (re-)registration rather than issuing a separate explicit state query.
 * **Not** rely on interrupting a blocking `accept()` on the subscription socket (there is no portable way to do that on Windows). Liveness detection must run independently of the accept loop.
 * **Back off gracefully** on hard errors (subscribe/send/accept failures) so a flapping komorebi cannot turn into a reconnect storm, and reset that back-off once a session has been healthy for long enough.
+* **Defensive reading**: To avoid hanging komorebi's sequential notification loop, the app must set a read timeout (e.g. 2 seconds) on every connection it `accept()`s from komorebi. If a notification cannot be read within that window, the connection must be closed to allow komorebi to proceed to other subscribers.
 
 ### Behavioral defaults
 
