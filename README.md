@@ -27,7 +27,7 @@ See [`spec.md`](spec.md) for the original spec and [`plan.md`](plan.md) for the 
 
 Early but functional. The MVP described in [`spec.md`](spec.md) is implemented end-to-end —
 renderer, komorebi event worker, per-monitor tray icons, right-click menu with the autostart
-toggle, single-instance guard, and a CI-built NSIS installer — and tagged as `v0.1.0`. See the
+toggle, single-instance guard, and a CI-built NSIS installer — and tagged as `v0.2.2`. See the
 [releases page](https://github.com/h0tk3y/komorebi-tray-grid/releases) for prebuilt binaries.
 Expect rough edges; bug reports and PRs are welcome.
 
