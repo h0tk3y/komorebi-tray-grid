@@ -46,6 +46,7 @@ komorebi-client = { git = "https://github.com/LGUG2Z/komorebi.git", tag = "v0.1.
 version = "0.62"
 features = [
     "Win32_Foundation",
+    "Win32_System_Registry",
     "Win32_System_Threading",
     "Win32_Security",
     "Win32_UI_WindowsAndMessaging",

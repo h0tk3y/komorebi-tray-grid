@@ -72,6 +72,14 @@ impl App {
         }
     }
 
+    pub fn on_theme_changed(&mut self, theme: Theme) {
+        if let Err(e) = self.tray.set_theme(theme, &self.world) {
+            tracing::error!(error = %e, "failed to apply updated theme");
+        } else {
+            tracing::debug!("applied updated theme");
+        }
+    }
+
     /// Handle a menu activation. May set `control_flow` to `Exit` for the
     /// quit item.
     ///

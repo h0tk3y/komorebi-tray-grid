@@ -25,6 +25,7 @@ use komorebi_tray_grid::config;
 use komorebi_tray_grid::event::UserEvent;
 use komorebi_tray_grid::komorebi::pipe::run_worker;
 use komorebi_tray_grid::single_instance::{self, Acquisition};
+use komorebi_tray_grid::windows_theme;
 
 fn main() {
     init_logging();
@@ -80,7 +81,9 @@ fn run() -> Result<()> {
 
     // The `App` (and its tray icons) must be created on the event-loop
     // thread, so defer construction to the `StartCause::Init` event.
-    let theme = config::load_theme();
+    let themes = config::load_themes();
+    let mut scheme = windows_theme::current_scheme();
+    spawn_windows_theme_watcher(proxy.clone()).context("spawn windows theme watcher thread")?;
     let mut app: Option<App> = None;
 
     event_loop.run(move |event, _target, control_flow| {
@@ -90,7 +93,7 @@ fn run() -> Result<()> {
             Event::NewEvents(StartCause::Init) => {
                 let initial_autostart = autostart::is_enabled();
                 tracing::debug!(initial_autostart, "initializing App on event-loop thread");
-                match App::new(initial_autostart, theme) {
+                match App::new(initial_autostart, themes.for_scheme(scheme)) {
                     Ok(a) => app = Some(a),
                     Err(e) => {
                         tracing::error!(error = ?e, "failed to initialize App");
@@ -112,6 +115,14 @@ fn run() -> Result<()> {
                     a.on_menu_event(menu_event, control_flow, &mut autostart_callback);
                 }
             }
+            Event::UserEvent(UserEvent::ColorSchemeChanged(new_scheme)) => {
+                if new_scheme != scheme {
+                    scheme = new_scheme;
+                    if let Some(a) = app.as_mut() {
+                        a.on_theme_changed(themes.for_scheme(new_scheme));
+                    }
+                }
+            }
             Event::UserEvent(UserEvent::TrayIcon(_)) => {
                 // Left/double click are no-ops for v1 per spec.
             }
@@ -121,6 +132,12 @@ fn run() -> Result<()> {
             _ => {}
         }
     });
+}
+
+fn spawn_windows_theme_watcher(
+    proxy: tao::event_loop::EventLoopProxy<UserEvent>,
+) -> Result<thread::JoinHandle<()>> {
+    windows_theme::spawn_watcher(proxy)
 }
 
 fn spawn_komorebi_worker(

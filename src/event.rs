@@ -5,6 +5,7 @@
 //! loop has a single match site.
 
 use crate::komorebi::state::WorldState;
+use crate::windows_theme::ColorScheme;
 
 #[derive(Debug)]
 pub enum UserEvent {
@@ -14,4 +15,6 @@ pub enum UserEvent {
     TrayIcon(tray_icon::TrayIconEvent),
     /// Activation of any tray-icon context-menu item.
     Menu(tray_icon::menu::MenuEvent),
+    /// Windows app color scheme changed (light/dark).
+    ColorSchemeChanged(ColorScheme),
 }

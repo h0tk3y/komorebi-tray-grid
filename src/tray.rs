@@ -67,6 +67,14 @@ impl TrayManager {
         Ok(())
     }
 
+    pub fn set_theme(&mut self, theme: Theme, world: &WorldState) -> Result<()> {
+        if self.theme == theme {
+            return Ok(());
+        }
+        self.theme = theme;
+        self.reconcile(world)
+    }
+
     /// `active` controls the color of the always-drawn outer monitor
     /// border: `true` → focused (blue), `false` → non-empty (gray).
     fn upsert(&mut self, monitor: &MonitorState, active: bool) -> Result<()> {

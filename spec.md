@@ -52,8 +52,12 @@ These are the visual and behavioral choices that should not be left to the
 implementor's discretion, because plausible alternatives would produce a
 materially different product:
 
-* **Colors (RGBA hex)**: focused = `#2E9BFFFF`, non-empty-1 = `#6B6B6BFF`, non-empty-2 = `#8C8C8CFF`, non-empty-3+ = `#B0B0B0FF`, full-screen border = `#FFD500FF`, empty = fully transparent. The active-monitor outer border uses the focused color; the inactive-monitor outer border uses non-empty-2.
-* **Color customization config**: the app may override the default colors from `%APPDATA%\komorebi-tray-grid\config.json` under `colors.{focused,non_empty_1,non_empty_2,non_empty_3_plus,full_screen_border,active_monitor_border,inactive_monitor_border,empty}`. `colors.non_empty` is removed and must not be used. Accepted formats are `#RRGGBB` (alpha defaults to `FF`) and `#RRGGBBAA`.
+* **Colors (RGBA hex)**:
+  * dark mode defaults: focused = `#2E9BFFFF`, non-empty-1 = `#6B6B6BFF`, non-empty-2 = `#8C8C8CFF`, non-empty-3+ = `#B0B0B0FF`, full-screen border = `#FFD500FF`, empty = fully transparent;
+  * light mode defaults: focused = `#0067C0FF`, non-empty-1 = `#868686FF`, non-empty-2 = `#6A6A6AFF`, non-empty-3+ = `#4F4F4FFF`, full-screen border = `#C7A000FF`, empty = fully transparent.
+  * In each mode, the active-monitor outer border uses the focused color; the inactive-monitor outer border uses non-empty-2.
+* **Windows theme sync**: app mode follows Windows `AppsUseLightTheme` and must switch icon colors immediately when the OS mode changes.
+* **Color customization config**: the app may override default colors from `%APPDATA%\komorebi-tray-grid\config.json` under `colors.dark.{focused,non_empty_1,non_empty_2,non_empty_3_plus,full_screen_border,active_monitor_border,inactive_monitor_border,empty}` and `colors.light.{focused,non_empty_1,non_empty_2,non_empty_3_plus,full_screen_border,active_monitor_border,inactive_monitor_border,empty}`. `colors.non_empty` is removed and must not be used. Accepted formats are `#RRGGBB` (alpha defaults to `FF`) and `#RRGGBBAA`.
 * **Color config failure mode**: if the config file is missing, unreadable, or invalid, the app must continue running with the default colors above (optionally logging a warning), and must not fail startup.
 * **Icon resolution**: each tray icon is rendered as a 32×32 RGBA bitmap; Windows scales it for hi-DPI displays.
 * **Full-screen border placement**: 2 px yellow border drawn *inside* the cell (it overlays the existing fill and does not extend into neighbouring cells).

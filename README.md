@@ -118,8 +118,14 @@ Logs go to stderr; the log level can be tuned with `KOMOREBI_TRAY_LOG`, e.g.
 
 ### Color customization
 
+The app tracks Windows app mode (`AppsUseLightTheme`) and switches colors instantly when
+you switch between dark and light mode.
+
 You can override tray colors with a per-user config file at:
 `%APPDATA%\komorebi-tray-grid\config.json`
+
+On a typical system this resolves to:
+`C:\Users\<your-user>\AppData\Roaming\komorebi-tray-grid\config.json`
 
 If the file is missing (or invalid), the app logs a warning and falls back to
 the built-in defaults.
@@ -127,19 +133,32 @@ the built-in defaults.
 ```json
 {
   "colors": {
-    "focused": "#2E9BFFFF",
-    "non_empty_1": "#6B6B6BFF",
-    "non_empty_2": "#8C8C8CFF",
-    "non_empty_3_plus": "#B0B0B0FF",
-    "full_screen_border": "#FFD500FF",
-    "active_monitor_border": "#2E9BFFFF",
-    "inactive_monitor_border": "#808080FF",
-    "empty": "#00000000"
+    "dark": {
+      "focused": "#2E9BFFFF",
+      "non_empty_1": "#6B6B6BFF",
+      "non_empty_2": "#8C8C8CFF",
+      "non_empty_3_plus": "#B0B0B0FF",
+      "full_screen_border": "#FFD500FF",
+      "active_monitor_border": "#2E9BFFFF",
+      "inactive_monitor_border": "#8C8C8CFF",
+      "empty": "#00000000"
+    },
+    "light": {
+      "focused": "#0067C0FF",
+      "non_empty_1": "#868686FF",
+      "non_empty_2": "#6A6A6AFF",
+      "non_empty_3_plus": "#4F4F4FFF",
+      "full_screen_border": "#C7A000FF",
+      "active_monitor_border": "#0067C0FF",
+      "inactive_monitor_border": "#6A6A6AFF",
+      "empty": "#00000000"
+    }
   }
 }
 ```
 
 `colors.non_empty` has been removed and is no longer used.
+All keys are under `colors.dark` and `colors.light`.
 
 Supported formats are `#RRGGBB` (alpha defaults to `FF`) and `#RRGGBBAA`.
 
