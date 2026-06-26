@@ -6,6 +6,7 @@
 
 pub mod app;
 pub mod autostart;
+pub mod config;
 pub mod event;
 pub mod komorebi;
 pub mod render;

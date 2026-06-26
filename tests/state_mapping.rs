@@ -36,13 +36,13 @@ fn single_monitor_focused_workspace_is_blue_and_others_follow_spec() {
     assert!(m.active);
 
     // Cell 0: non-empty, not focused (focused is ws 1).
-    assert!(m.cells[0].non_empty);
+    assert_eq!(m.cells[0].window_count, 1);
     assert!(!m.cells[0].focused);
     assert!(!m.cells[0].full_screen);
 
-    // Cell 1: focused + non-empty.
+    // Cell 1: focused + non-empty (2 windows in fixture).
     assert!(m.cells[1].focused);
-    assert!(m.cells[1].non_empty);
+    assert_eq!(m.cells[1].window_count, 2);
     assert!(!m.cells[1].full_screen);
 
     // Cell 2: empty workspace.
@@ -63,9 +63,9 @@ fn multi_monitor_each_icon_reflects_only_its_own_state() {
     let a = &w.monitors[0];
     assert_eq!(a.id, "MON-A");
     assert!(a.cells[0].focused);
-    assert!(a.cells[0].non_empty);
+    assert_eq!(a.cells[0].window_count, 1);
     assert!(!a.cells[1].focused);
-    assert!(!a.cells[1].non_empty);
+    assert_eq!(a.cells[1].window_count, 0);
     // monitors.focused is 1 in the fixture → only B is active.
     assert!(!a.active);
 
@@ -73,11 +73,11 @@ fn multi_monitor_each_icon_reflects_only_its_own_state() {
     let b = &w.monitors[1];
     assert_eq!(b.id, "MON-B");
     assert!(!b.cells[0].focused);
-    assert!(!b.cells[0].non_empty);
+    assert_eq!(b.cells[0].window_count, 0);
     assert!(b.cells[1].focused);
-    assert!(b.cells[1].non_empty);
+    assert_eq!(b.cells[1].window_count, 1);
     assert!(!b.cells[2].focused);
-    assert!(b.cells[2].non_empty);
+    assert_eq!(b.cells[2].window_count, 1);
     assert!(b.active);
 
     // The two monitors' focus indices are independent.
@@ -98,17 +98,17 @@ fn maximized_window_and_monocle_container_both_mark_full_screen() {
 
     // ws 0: only `maximized_window` set.
     assert!(m.cells[0].full_screen);
-    assert!(m.cells[0].non_empty);
+    assert_eq!(m.cells[0].window_count, 1);
     assert!(m.cells[0].focused);
 
     // ws 1: only `monocle_container` set.
     assert!(m.cells[1].full_screen);
-    assert!(m.cells[1].non_empty);
+    assert_eq!(m.cells[1].window_count, 1);
     assert!(!m.cells[1].focused);
 
     // ws 2: normal container, no full-screen marker.
     assert!(!m.cells[2].full_screen);
-    assert!(m.cells[2].non_empty);
+    assert_eq!(m.cells[2].window_count, 1);
 }
 
 #[test]
@@ -117,8 +117,8 @@ fn empty_trailing_workspaces_render_as_empty_cells() {
     let m = &w.monitors[0];
 
     assert_eq!(m.id, "TRAIL-MON");
-    assert!(m.cells[0].non_empty);
-    assert!(m.cells[1].non_empty);
+    assert_eq!(m.cells[0].window_count, 1);
+    assert_eq!(m.cells[1].window_count, 1);
 
     // Only 2 workspaces reported → cells 2..8 must be the default `EMPTY`.
     for i in 2..9 {

@@ -21,6 +21,7 @@ use tray_icon::{menu::MenuEvent, TrayIconEvent};
 
 use komorebi_tray_grid::app::App;
 use komorebi_tray_grid::autostart;
+use komorebi_tray_grid::config;
 use komorebi_tray_grid::event::UserEvent;
 use komorebi_tray_grid::komorebi::pipe::run_worker;
 use komorebi_tray_grid::single_instance::{self, Acquisition};
@@ -79,6 +80,7 @@ fn run() -> Result<()> {
 
     // The `App` (and its tray icons) must be created on the event-loop
     // thread, so defer construction to the `StartCause::Init` event.
+    let theme = config::load_theme();
     let mut app: Option<App> = None;
 
     event_loop.run(move |event, _target, control_flow| {
@@ -88,7 +90,7 @@ fn run() -> Result<()> {
             Event::NewEvents(StartCause::Init) => {
                 let initial_autostart = autostart::is_enabled();
                 tracing::debug!(initial_autostart, "initializing App on event-loop thread");
-                match App::new(initial_autostart) {
+                match App::new(initial_autostart, theme) {
                     Ok(a) => app = Some(a),
                     Err(e) => {
                         tracing::error!(error = ?e, "failed to initialize App");

@@ -1,7 +1,7 @@
 //! UI-friendly projection of komorebi's [`types::State`] into a per-monitor
 //! 3×3 grid of [`render::CellState`]s.
 
-use crate::komorebi::types::{self, json_collection_non_empty};
+use crate::komorebi::types;
 use crate::render::CellState;
 
 /// Number of cells per tray icon (3 × 3).
@@ -89,15 +89,27 @@ fn project_workspace(
     focused_workspace: usize,
     ws: &types::Workspace,
 ) -> CellState {
-    let has_containers = !ws.containers.is_empty();
-    let has_floating = json_collection_non_empty(&ws.floating_windows);
+    let containers = ws.containers.len();
+    let floating = json_collection_len(&ws.floating_windows);
     let has_monocle = ws.monocle_container.is_some();
     let has_maximized = ws.maximized_window.is_some();
+    let extras = usize::from(has_monocle) + usize::from(has_maximized);
+    let window_count = containers.saturating_add(floating).saturating_add(extras);
 
     CellState {
         focused: index == focused_workspace,
-        non_empty: has_containers || has_floating || has_monocle || has_maximized,
+        window_count: window_count.min(u8::MAX as usize) as u8,
         full_screen: has_monocle || has_maximized,
+    }
+}
+
+fn json_collection_len(v: &serde_json::Value) -> usize {
+    if let Some(arr) = v.get("elements").and_then(|e| e.as_array()) {
+        arr.len()
+    } else if let Some(arr) = v.as_array() {
+        arr.len()
+    } else {
+        0
     }
 }
 
@@ -157,7 +169,7 @@ mod tests {
         }));
         let m = &w.monitors[0];
         assert_eq!(m.id, "DEV-1");
-        assert!(m.cells[0].non_empty);
+        assert_eq!(m.cells[0].window_count, 1);
         assert!(m.cells[0].focused);
         assert!(!m.cells[0].full_screen);
         // Trailing cells are empty.
@@ -182,7 +194,7 @@ mod tests {
             }], "focused": 0 }
         }));
         let cell = w.monitors[0].cells[0];
-        assert!(cell.non_empty);
+        assert_eq!(cell.window_count, 1);
         assert!(cell.full_screen);
         assert!(cell.focused);
     }
@@ -203,7 +215,7 @@ mod tests {
             }], "focused": 0 }
         }));
         let cell = w.monitors[0].cells[0];
-        assert!(cell.non_empty);
+        assert_eq!(cell.window_count, 1);
         assert!(cell.full_screen);
     }
 
@@ -222,7 +234,7 @@ mod tests {
             }], "focused": 0 }
         }));
         let cell = w.monitors[0].cells[0];
-        assert!(cell.non_empty);
+        assert_eq!(cell.window_count, 1);
         assert!(!cell.full_screen);
     }
 
@@ -290,7 +302,7 @@ mod tests {
             }], "focused": 0 }
         }));
         for i in 0..9 {
-            assert!(w.monitors[0].cells[i].non_empty);
+            assert_eq!(w.monitors[0].cells[i].window_count, 1);
         }
     }
 
@@ -309,8 +321,8 @@ mod tests {
             }], "focused": 0 }
         }));
         let m = &w.monitors[0];
-        assert!(m.cells[0].non_empty);
-        assert!(m.cells[1].non_empty);
+        assert_eq!(m.cells[0].window_count, 1);
+        assert_eq!(m.cells[1].window_count, 1);
         for i in 2..9 {
             assert_eq!(m.cells[i], CellState::EMPTY);
         }
@@ -345,6 +357,28 @@ mod tests {
                 }
             }], "focused": 0 }
         }));
-        assert!(w.monitors[0].cells[0].non_empty);
+        assert_eq!(w.monitors[0].cells[0].window_count, 1);
+    }
+
+    #[test]
+    fn window_count_adds_containers_floating_and_full_screen_sources() {
+        let w = parse(json!({
+            "monitors": { "elements": [{
+                "device_id": "DEV-1",
+                "workspaces": {
+                    "elements": [{
+                        "containers": { "elements": [{}, {}], "focused": 0 },
+                        "floating_windows": { "elements": [{}, {}], "focused": 0 },
+                        "monocle_container": { "id": "x" },
+                        "maximized_window": { "hwnd": 1 }
+                    }],
+                    "focused": 0
+                }
+            }], "focused": 0 }
+        }));
+
+        let cell = w.monitors[0].cells[0];
+        assert_eq!(cell.window_count, 6);
+        assert!(cell.full_screen);
     }
 }

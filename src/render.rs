@@ -33,8 +33,14 @@ pub const BORDER_THICKNESS: u32 = 2;
 /// Bright blue fill for the focused workspace.
 pub const COLOR_FOCUSED: [u8; 4] = [0x2E, 0x9B, 0xFF, 0xFF];
 
-/// Gray fill for a non-empty (but not focused) workspace.
-pub const COLOR_NON_EMPTY: [u8; 4] = [0x80, 0x80, 0x80, 0xFF];
+/// Dim gray fill for a non-empty workspace with one window.
+pub const COLOR_NON_EMPTY_1: [u8; 4] = [0x6B, 0x6B, 0x6B, 0xFF];
+
+/// Medium gray fill for a non-empty workspace with two windows.
+pub const COLOR_NON_EMPTY_2: [u8; 4] = [0x8C, 0x8C, 0x8C, 0xFF];
+
+/// Light gray fill for a non-empty workspace with three or more windows.
+pub const COLOR_NON_EMPTY_3_PLUS: [u8; 4] = [0xB0, 0xB0, 0xB0, 0xFF];
 
 /// Yellow border drawn on top of cells that contain a full-screen window
 /// (maximized window or monocle container). Yellow is used so the indicator
@@ -54,13 +60,41 @@ pub const COLOR_ACTIVE_MONITOR: [u8; 4] = COLOR_FOCUSED;
 /// *not* currently focused. Uses the same gray as a non-empty cell so all
 /// icons share the same visual footprint and the active highlight reads
 /// as a state change rather than a size change.
-pub const COLOR_INACTIVE_MONITOR: [u8; 4] = COLOR_NON_EMPTY;
+pub const COLOR_INACTIVE_MONITOR: [u8; 4] = COLOR_NON_EMPTY_2;
 
 /// Thickness of the per-monitor outer border (active or inactive), in pixels.
 pub const MONITOR_BORDER: u32 = 1;
 
 /// Fully transparent pixel used as the empty-cell background.
 pub const COLOR_TRANSPARENT: [u8; 4] = [0, 0, 0, 0];
+
+/// Runtime-configurable renderer theme.
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct Theme {
+    pub focused: [u8; 4],
+    pub non_empty_1: [u8; 4],
+    pub non_empty_2: [u8; 4],
+    pub non_empty_3_plus: [u8; 4],
+    pub full_screen_border: [u8; 4],
+    pub active_monitor_border: [u8; 4],
+    pub inactive_monitor_border: [u8; 4],
+    pub empty: [u8; 4],
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            focused: COLOR_FOCUSED,
+            non_empty_1: COLOR_NON_EMPTY_1,
+            non_empty_2: COLOR_NON_EMPTY_2,
+            non_empty_3_plus: COLOR_NON_EMPTY_3_PLUS,
+            full_screen_border: COLOR_BORDER_FS,
+            active_monitor_border: COLOR_ACTIVE_MONITOR,
+            inactive_monitor_border: COLOR_INACTIVE_MONITOR,
+            empty: COLOR_TRANSPARENT,
+        }
+    }
+}
 
 const _: () = {
     // Compile-time sanity check that the geometry actually fills the icon.
@@ -76,8 +110,8 @@ const _: () = {
 pub struct CellState {
     /// The workspace at this cell is the focused workspace on its monitor.
     pub focused: bool,
-    /// The workspace contains at least one container (i.e. window).
-    pub non_empty: bool,
+    /// Number of windows in this workspace, saturated at 255.
+    pub window_count: u8,
     /// The workspace contains a full-screen / maximized container.
     pub full_screen: bool,
 }
@@ -85,7 +119,7 @@ pub struct CellState {
 impl CellState {
     pub const EMPTY: Self = Self {
         focused: false,
-        non_empty: false,
+        window_count: 0,
         full_screen: false,
     };
 }
@@ -96,7 +130,14 @@ impl CellState {
 /// consumable by `tray_icon::Icon::from_rgba`. Returned length is always
 /// `(ICON_SIZE * ICON_SIZE * 4)` bytes.
 pub fn render_grid(cells: &[CellState; 9]) -> Vec<u8> {
+    render_grid_with_theme(cells, &Theme::default())
+}
+
+pub fn render_grid_with_theme(cells: &[CellState; 9], theme: &Theme) -> Vec<u8> {
     let mut pixels = vec![0u8; (ICON_SIZE * ICON_SIZE * 4) as usize];
+    pixels
+        .chunks_exact_mut(4)
+        .for_each(|px| px.copy_from_slice(&theme.empty));
 
     for (i, cell) in cells.iter().enumerate() {
         let col = (i % 3) as u32;
@@ -107,11 +148,15 @@ pub fn render_grid(cells: &[CellState; 9]) -> Vec<u8> {
         let x1 = x0 + CELL_SIZE;
         let y1 = y0 + CELL_SIZE;
 
-        // Fill (focused beats non-empty; empty stays transparent).
+        // Fill (focused beats non-empty tiers; empty stays transparent).
         let fill = if cell.focused {
-            Some(COLOR_FOCUSED)
-        } else if cell.non_empty {
-            Some(COLOR_NON_EMPTY)
+            Some(theme.focused)
+        } else if cell.window_count >= 3 {
+            Some(theme.non_empty_3_plus)
+        } else if cell.window_count == 2 {
+            Some(theme.non_empty_2)
+        } else if cell.window_count == 1 {
+            Some(theme.non_empty_1)
         } else {
             None
         };
@@ -128,7 +173,7 @@ pub fn render_grid(cells: &[CellState; 9]) -> Vec<u8> {
                 x1,
                 y1,
                 BORDER_THICKNESS,
-                COLOR_BORDER_FS,
+                theme.full_screen_border,
             );
         }
     }
@@ -161,10 +206,14 @@ fn fill_rect(pixels: &mut [u8], x0: u32, y0: u32, x1: u32, y1: u32, color: [u8; 
 /// edge cells by at most one pixel, which is visually unnoticeable after
 /// Windows scales the icon down to its tray size.
 pub fn paint_monitor_border(pixels: &mut [u8], active: bool) {
+    paint_monitor_border_with_theme(pixels, active, &Theme::default())
+}
+
+pub fn paint_monitor_border_with_theme(pixels: &mut [u8], active: bool, theme: &Theme) {
     let color = if active {
-        COLOR_ACTIVE_MONITOR
+        theme.active_monitor_border
     } else {
-        COLOR_INACTIVE_MONITOR
+        theme.inactive_monitor_border
     };
     draw_border(pixels, 0, 0, ICON_SIZE, ICON_SIZE, MONITOR_BORDER, color);
 }
@@ -217,7 +266,7 @@ mod tests {
         let mut cells = [CellState::EMPTY; 9];
         cells[0] = CellState {
             focused: true,
-            non_empty: true,
+            window_count: 3,
             full_screen: false,
         };
         let buf = render_grid(&cells);
@@ -226,11 +275,25 @@ mod tests {
     }
 
     #[test]
+    fn non_empty_uses_tiered_grays_by_window_count() {
+        let mut cells = [CellState::EMPTY; 9];
+        cells[0].window_count = 1;
+        cells[1].window_count = 2;
+        cells[2].window_count = 5;
+
+        let buf = render_grid(&cells);
+
+        assert_eq!(pixel_at(&buf, 1, 1), COLOR_NON_EMPTY_1);
+        assert_eq!(pixel_at(&buf, 12, 1), COLOR_NON_EMPTY_2);
+        assert_eq!(pixel_at(&buf, 23, 1), COLOR_NON_EMPTY_3_PLUS);
+    }
+
+    #[test]
     fn full_screen_paints_border_on_top_of_fill() {
         let mut cells = [CellState::EMPTY; 9];
         cells[4] = CellState {
             focused: true,
-            non_empty: false,
+            window_count: 0,
             full_screen: true,
         };
         let buf = render_grid(&cells);
@@ -247,7 +310,7 @@ mod tests {
         let mut cells = [CellState::EMPTY; 9];
         cells[8] = CellState {
             focused: false,
-            non_empty: false,
+            window_count: 0,
             full_screen: true,
         };
         let buf = render_grid(&cells);
@@ -292,7 +355,7 @@ mod tests {
         }
         // Sanity check: the configured inactive color matches the gray
         // non-empty cell fill, not the focused blue.
-        assert_eq!(COLOR_INACTIVE_MONITOR, COLOR_NON_EMPTY);
+        assert_eq!(COLOR_INACTIVE_MONITOR, COLOR_NON_EMPTY_2);
         assert_ne!(COLOR_INACTIVE_MONITOR, COLOR_ACTIVE_MONITOR);
         // One pixel inside the rim stays transparent (still empty grid).
         assert_eq!(pixel_at(&buf, 1, 1), COLOR_TRANSPARENT);
@@ -302,7 +365,7 @@ mod tests {
     fn gap_pixels_stay_transparent() {
         let cells = [CellState {
             focused: true,
-            non_empty: true,
+            window_count: 3,
             full_screen: true,
         }; 9];
         let buf = render_grid(&cells);

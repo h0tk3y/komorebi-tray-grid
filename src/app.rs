@@ -12,6 +12,7 @@ use tray_icon::menu::{
 };
 
 use crate::komorebi::state::WorldState;
+use crate::render::Theme;
 use crate::tray::TrayManager;
 
 /// The full event-loop-bound application.
@@ -27,7 +28,7 @@ impl App {
     /// autostart checkbox from `initial_autostart`. No tray icons are
     /// created here — they're added on the first [`Self::on_state_changed`]
     /// call.
-    pub fn new(initial_autostart: bool) -> Result<Self> {
+    pub fn new(initial_autostart: bool, theme: Theme) -> Result<Self> {
         let autostart_item = CheckMenuItem::new(
             "Enable autostart",
             true, // enabled
@@ -47,7 +48,7 @@ impl App {
 
         Ok(Self {
             world: WorldState::default(),
-            tray: TrayManager::new(menu),
+            tray: TrayManager::new(menu, theme),
             autostart_item,
             quit_item,
         })

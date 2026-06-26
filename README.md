@@ -11,8 +11,10 @@ Per-cell visuals:
 | Cell state                                  | Appearance                                   |
 | ------------------------------------------- | -------------------------------------------- |
 | empty workspace                             | transparent (no fill)                        |
-| non-empty workspace                         | gray fill                                    |
-| focused workspace                           | bright blue fill                             |
+| workspace with 1 window                     | dim gray fill                                |
+| workspace with 2 windows                    | medium gray fill                             |
+| workspace with 3+ windows                   | light gray fill                              |
+| focused workspace                           | bright blue fill (overrides gray tiers)      |
 | workspace contains a full-screen container  | yellow border (composes with the fill above) |
 
 Right-clicking any tray icon opens the same menu, with:
@@ -113,6 +115,33 @@ The app talks to komorebi directly over its AF_UNIX socket via the
 
 Logs go to stderr; the log level can be tuned with `KOMOREBI_TRAY_LOG`, e.g.
 `$env:KOMOREBI_TRAY_LOG = "debug"`.
+
+### Color customization
+
+You can override tray colors with a per-user config file at:
+`%APPDATA%\komorebi-tray-grid\config.json`
+
+If the file is missing (or invalid), the app logs a warning and falls back to
+the built-in defaults.
+
+```json
+{
+  "colors": {
+    "focused": "#2E9BFFFF",
+    "non_empty_1": "#6B6B6BFF",
+    "non_empty_2": "#8C8C8CFF",
+    "non_empty_3_plus": "#B0B0B0FF",
+    "full_screen_border": "#FFD500FF",
+    "active_monitor_border": "#2E9BFFFF",
+    "inactive_monitor_border": "#808080FF",
+    "empty": "#00000000"
+  }
+}
+```
+
+`colors.non_empty` has been removed and is no longer used.
+
+Supported formats are `#RRGGBB` (alpha defaults to `FF`) and `#RRGGBBAA`.
 
 ## Releases
 

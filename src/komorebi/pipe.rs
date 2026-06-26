@@ -89,6 +89,7 @@ use anyhow::{Context, Result};
 use komorebi_client::{send_query, subscribe, SocketMessage};
 use serde::Deserialize;
 use uds_windows::UnixStream;
+use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SHUTTINGDOWN};
 
 use crate::komorebi::{state::WorldState, types};
 
@@ -368,6 +369,10 @@ fn komorebi_socket_path() -> Option<PathBuf> {
 /// `process_command` / `notify_subscribers`, so other subscribers see no
 /// extra traffic.
 fn komorebi_is_alive(path: &PathBuf) -> bool {
+    if system_is_shutting_down() {
+        return false;
+    }
+
     match UnixStream::connect(path) {
         Ok(stream) => {
             // Be polite and don't sit in komorebi's read with no data:
@@ -377,6 +382,12 @@ fn komorebi_is_alive(path: &PathBuf) -> bool {
         }
         Err(_) => false,
     }
+}
+
+fn system_is_shutting_down() -> bool {
+    // During OS shutdown/logoff Windows starts tearing down userland pieces in
+    // undefined order. Avoid any reconnect/liveness churn in that phase.
+    unsafe { GetSystemMetrics(SM_SHUTTINGDOWN) != 0 }
 }
 
 /// Owns the watchdog thread. On `Drop`, signals the thread to stop (by
@@ -471,6 +482,11 @@ fn watchdog_thread(
     // entirely (we'd see only `true → true` forever).
     let mut was_alive = komorebi_is_alive(&komorebi_socket);
     loop {
+        if system_is_shutting_down() {
+            tracing::debug!("system shutdown in progress; stopping watchdog");
+            return;
+        }
+
         match stop_rx.recv_timeout(WATCHDOG_INTERVAL) {
             // Owner dropped the sender → session is shutting down.
             Ok(()) | Err(RecvTimeoutError::Disconnected) => return,

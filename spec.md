@@ -9,15 +9,20 @@ Each element in the grid, numbered as `i`, represents a komorebi workspace numbe
 The indicators available are the following:
 * `i`-th workspace is focused - highlighted with a bright blue color;
 * `i`-th workspace has a full-screen app - the square has a yellow border (might be displayed together with the focused state);
-* `i`-th workspace is non-empty - the square is filled with gray;
+* `i`-th workspace has 1 window - the square is filled with dim gray;
+* `i`-th workspace has 2 windows - the square is filled with medium gray;
+* `i`-th workspace has 3 or more windows - the square is filled with light gray;
 * `i`-th workspace is empty - the square is not filled, i.e. has a transparent background.
 
 The app gets the status from komorebi window manager by talking to komorebi's IPC directly, in-process, through the upstream Rust crates published by the komorebi project (see the **komorebi integration** requirement below). It subscribes to komorebi's event stream and parses the `State` payload that komorebi pushes on every notification (and that the app can also query on demand for initial seeding / reconnect). Workspaces are available per-monitor, under `monitors` / `elements[]` / `workspaces[]` (and each item in the array has `containers[]` that can be empty or non-empty). If there are fewer workspaces than the grid can display, assume that the others are empty. The numbers to match the workspaces with the squares are implicit in the status, they are not in the output, the order sets them.
 
-When there is more than one monitor, the app should show one tray icon per monitor, with the corresponding monitor's workspaces content in each icon. Every icon — whether there is one monitor or several — is decorated with a small outer border: the icon for the currently focused monitor uses the focused (blue) color so the active monitor can be told apart at a glance, and the icons for any inactive monitors use the non-empty (gray) color. With a single monitor the border is always drawn in the focused (blue) color, since that monitor is by definition the active one. This keeps the icon footprint uniform across single- and multi-monitor setups and makes the active highlight read as a state change rather than a size change.
+When there is more than one monitor, the app should show one tray icon per monitor, with the corresponding monitor's workspaces content in each icon. Every icon — whether there is one monitor or several — is decorated with a small outer border: the icon for the currently focused monitor uses the focused (blue) color so the active monitor can be told apart at a glance, and the icons for any inactive monitors use the medium non-empty gray. With a single monitor the border is always drawn in the focused (blue) color, since that monitor is by definition the active one. This keeps the icon footprint uniform across single- and multi-monitor setups and makes the active highlight read as a state change rather than a size change.
 
 The app has an autostart feature that can be enabled or disabled in the 
 right-click menu on the tray icon. Each tray icon should show the same right-click menu.
+
+The app supports per-user color customization through a JSON config file at
+`%APPDATA%\komorebi-tray-grid\config.json`.
 
 ### komorebi integration
 
@@ -47,10 +52,12 @@ These are the visual and behavioral choices that should not be left to the
 implementor's discretion, because plausible alternatives would produce a
 materially different product:
 
-* **Colors (RGBA hex)**: focused = `#2E9BFFFF`, full-screen border = `#FFD500FF`, non-empty = `#808080FF`, empty = fully transparent. The active-monitor outer border uses the focused color; the inactive-monitor outer border uses the non-empty color.
+* **Colors (RGBA hex)**: focused = `#2E9BFFFF`, non-empty-1 = `#6B6B6BFF`, non-empty-2 = `#8C8C8CFF`, non-empty-3+ = `#B0B0B0FF`, full-screen border = `#FFD500FF`, empty = fully transparent. The active-monitor outer border uses the focused color; the inactive-monitor outer border uses non-empty-2.
+* **Color customization config**: the app may override the default colors from `%APPDATA%\komorebi-tray-grid\config.json` under `colors.{focused,non_empty_1,non_empty_2,non_empty_3_plus,full_screen_border,active_monitor_border,inactive_monitor_border,empty}`. `colors.non_empty` is removed and must not be used. Accepted formats are `#RRGGBB` (alpha defaults to `FF`) and `#RRGGBBAA`.
+* **Color config failure mode**: if the config file is missing, unreadable, or invalid, the app must continue running with the default colors above (optionally logging a warning), and must not fail startup.
 * **Icon resolution**: each tray icon is rendered as a 32×32 RGBA bitmap; Windows scales it for hi-DPI displays.
 * **Full-screen border placement**: 2 px yellow border drawn *inside* the cell (it overlays the existing fill and does not extend into neighbouring cells).
-* **Monitor outer border placement**: 1 px outer border around the whole 3×3 grid, drawn on every icon. It uses the focused color for the active monitor and the non-empty color for inactive monitors. On a single-monitor setup the only icon gets the focused (blue) border.
+* **Monitor outer border placement**: 1 px outer border around the whole 3×3 grid, drawn on every icon. It uses the focused color for the active monitor and non-empty-2 for inactive monitors. On a single-monitor setup the only icon gets the focused (blue) border.
 * **"No such workspace" vs. empty workspace**: rendered identically (transparent cell). The icon does not visually distinguish "workspace exists but has no windows" from "this workspace index is beyond what komorebi reports".
 * **More than 9 workspaces**: cells 0..8 are rendered as usual; workspaces with index ≥ 9 are silently ignored.
 * **Single-instance scope is per-user**: the singleton guard must be scoped to the current Windows user session (e.g. `Local\…` mutex), so two different users on the same machine (RDP, fast user switching) can each run their own instance.

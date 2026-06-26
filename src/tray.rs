@@ -13,7 +13,7 @@ use tray_icon::{
 };
 
 use crate::komorebi::state::{MonitorState, WorldState};
-use crate::render::{paint_monitor_border, render_grid, ICON_SIZE};
+use crate::render::{paint_monitor_border_with_theme, render_grid_with_theme, Theme, ICON_SIZE};
 
 /// Manages the lifecycle of all per-monitor tray icons.
 pub struct TrayManager {
@@ -24,15 +24,17 @@ pub struct TrayManager {
     /// Map from `MonitorState::id` → live `TrayIcon` handle. The order
     /// doesn't matter; we look up by id on every reconcile.
     icons: HashMap<String, TrayIcon>,
+    theme: Theme,
 }
 
 impl TrayManager {
     /// Build an empty manager that will use `menu` for every icon's
     /// right-click context menu.
-    pub fn new(menu: Menu) -> Self {
+    pub fn new(menu: Menu, theme: Theme) -> Self {
         Self {
             menu,
             icons: HashMap::new(),
+            theme,
         }
     }
 
@@ -68,8 +70,8 @@ impl TrayManager {
     /// `active` controls the color of the always-drawn outer monitor
     /// border: `true` → focused (blue), `false` → non-empty (gray).
     fn upsert(&mut self, monitor: &MonitorState, active: bool) -> Result<()> {
-        let mut rgba = render_grid(&monitor.cells);
-        paint_monitor_border(&mut rgba, active);
+        let mut rgba = render_grid_with_theme(&monitor.cells, &self.theme);
+        paint_monitor_border_with_theme(&mut rgba, active, &self.theme);
         let icon = Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE)
             .context("build tray icon from RGBA buffer")?;
         let tooltip = tooltip_for(monitor);

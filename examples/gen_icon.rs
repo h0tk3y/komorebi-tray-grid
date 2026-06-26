@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
     let mut cells = [CellState::EMPTY; 9];
     cells[0] = CellState {
         focused: true,
-        non_empty: false,
+        window_count: 0,
         full_screen: false,
     };
 

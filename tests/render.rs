@@ -23,12 +23,12 @@ fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn cells_from(states: [(bool, bool, bool); 9]) -> [CellState; 9] {
+fn cells_from(states: [(bool, u8, bool); 9]) -> [CellState; 9] {
     let mut out = [CellState::default(); 9];
-    for (i, &(focused, non_empty, full_screen)) in states.iter().enumerate() {
+    for (i, &(focused, window_count, full_screen)) in states.iter().enumerate() {
         out[i] = CellState {
             focused,
-            non_empty,
+            window_count,
             full_screen,
         };
     }
@@ -89,22 +89,22 @@ fn snapshot_all_empty() {
 
 #[test]
 fn snapshot_single_focused() {
-    let mut states = [(false, false, false); 9];
-    states[4] = (true, false, false); // center cell focused
+    let mut states = [(false, 0, false); 9];
+    states[4] = (true, 0, false); // center cell focused
     assert_snapshot("single_focused.png", &render_grid(&cells_from(states)));
 }
 
 #[test]
 fn snapshot_single_non_empty() {
-    let mut states = [(false, false, false); 9];
-    states[0] = (false, true, false); // top-left has windows
+    let mut states = [(false, 0, false); 9];
+    states[0] = (false, 2, false); // top-left has windows
     assert_snapshot("single_non_empty.png", &render_grid(&cells_from(states)));
 }
 
 #[test]
 fn snapshot_focused_full_screen() {
-    let mut states = [(false, false, false); 9];
-    states[4] = (true, true, true); // center: focused + maximized
+    let mut states = [(false, 0, false); 9];
+    states[4] = (true, 1, true); // center: focused + maximized
     assert_snapshot(
         "focused_full_screen.png",
         &render_grid(&cells_from(states)),
@@ -113,8 +113,8 @@ fn snapshot_focused_full_screen() {
 
 #[test]
 fn snapshot_non_empty_full_screen() {
-    let mut states = [(false, false, false); 9];
-    states[8] = (false, true, true); // bottom-right: maximized, not focused
+    let mut states = [(false, 0, false); 9];
+    states[8] = (false, 1, true); // bottom-right: maximized, not focused
     assert_snapshot(
         "non_empty_full_screen.png",
         &render_grid(&cells_from(states)),
@@ -125,15 +125,15 @@ fn snapshot_non_empty_full_screen() {
 fn snapshot_mixed_grid() {
     // A representative mix exercising every state combination at once.
     let states = [
-        (false, true, false),   // 0: gray
-        (true, true, false),    // 1: blue (focused + non-empty)
-        (false, false, false),  // 2: empty
-        (false, true, true),    // 3: gray + yellow border
-        (false, false, false),  // 4: empty
-        (true, true, true),     // 5: blue + yellow border
-        (false, false, true),   // 6: only border (empty workspace, weird but allowed)
-        (false, true, false),   // 7: gray
-        (false, false, false),  // 8: empty
+        (false, 1, false), // 0: dim gray
+        (true, 2, false),  // 1: blue (focused + non-empty)
+        (false, 0, false), // 2: empty
+        (false, 3, true),  // 3: light gray + yellow border
+        (false, 0, false), // 4: empty
+        (true, 1, true),   // 5: blue + yellow border
+        (false, 0, true),  // 6: only border (empty workspace, weird but allowed)
+        (false, 2, false), // 7: medium gray
+        (false, 0, false), // 8: empty
     ];
     assert_snapshot("mixed_grid.png", &render_grid(&cells_from(states)));
 }
