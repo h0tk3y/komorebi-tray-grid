@@ -77,7 +77,6 @@
 //! multi-second latency users saw between komorebi events and tray-icon
 //! updates. We still `accept()` in a tight loop on the steady-state path.
 
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
@@ -270,19 +269,9 @@ fn subscribe_loop(state_tx: &Sender<WorldState>) -> Result<SessionEnd> {
 
         // Defensive: never let a hanging connection block our worker (and
         // thus potentially hang komorebi's sequential notification loop).
-        // Since komorebi writes the full notification in one go and then
-        // closes the stream, a few seconds is plenty.
-        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-
-        // Read until EOF — komorebi writes the JSON and closes the stream.
-        let mut buf = String::new();
-        if let Err(e) = stream.read_to_string(&mut buf) {
-            // Transient per-event read failure — log and keep the
-            // subscription alive; the next event will likely succeed.
-            tracing::warn!(error = ?e, "failed to read komorebi notification");
-            continue;
-        }
-        drop(stream);
+        // Keep this timeout short: if a peer stalls, failing fast keeps
+        // subsequent notifications flowing.
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
 
         // After every accepted connection, check whether the watchdog asked
         // us to bail out. We do this regardless of payload size, because
@@ -296,19 +285,20 @@ fn subscribe_loop(state_tx: &Sender<WorldState>) -> Result<SessionEnd> {
             return Ok(SessionEnd::WatchdogTriggered);
         }
 
-        if buf.is_empty() {
-            // Spurious zero-byte connection (e.g. a stray probe). Ignore
-            // and wait for the next event.
-            continue;
-        }
-
-        tracing::trace!(bytes = buf.len(), "komorebi notification received");
-
-        let envelope: NotificationEnvelope = match serde_json::from_str(&buf) {
+        // Parse directly from the stream rather than reading to EOF first.
+        // This avoids waiting for the writer's close when the full JSON is
+        // already available.
+        let envelope: NotificationEnvelope = match serde_json::from_reader(&mut stream) {
             Ok(e) => e,
             Err(e) => {
-                // Schema drift or partial write: fall back to a fresh state
-                // query so the UI doesn't go stale on a single bad message.
+                // Empty/probe connection (watchdog wake-up or stray client).
+                if e.is_eof() {
+                    continue;
+                }
+
+                // Schema drift or short/partial write: fall back to a fresh
+                // state query so the UI doesn't go stale on a single bad
+                // message.
                 tracing::warn!(
                     error = ?e,
                     "failed to parse komorebi notification; falling back to state query",
