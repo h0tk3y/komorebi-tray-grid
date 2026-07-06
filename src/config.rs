@@ -14,6 +14,17 @@ use crate::windows_theme::ColorScheme;
 struct AppConfig {
     #[serde(default)]
     colors: ColorsConfig,
+    #[serde(default)]
+    menu: MenuConfig,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct MenuConfig {
+    pub show_hotkey: Option<String>,
+    #[serde(default = "default_max_title_length")]
+    pub max_title_length: usize,
+    #[serde(default = "default_max_combined_title_length")]
+    pub max_combined_title_length: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -92,24 +103,43 @@ impl Default for ThemeSet {
     }
 }
 
-pub fn load_themes() -> ThemeSet {
-    match try_load_themes() {
-        Ok(themes) => themes,
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to load config; using default colors");
-            ThemeSet::default()
+#[derive(Clone, Debug)]
+pub struct AppSettings {
+    pub themes: ThemeSet,
+    pub show_hotkey: Option<String>,
+    pub max_title_length: usize,
+    pub max_combined_title_length: usize,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            themes: ThemeSet::default(),
+            show_hotkey: None,
+            max_title_length: default_max_title_length(),
+            max_combined_title_length: default_max_combined_title_length(),
         }
     }
 }
 
-fn try_load_themes() -> Result<ThemeSet> {
+pub fn load_settings() -> AppSettings {
+    match try_load_settings() {
+        Ok(settings) => settings,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to load config; using default settings");
+            AppSettings::default()
+        }
+    }
+}
+
+fn try_load_settings() -> Result<AppSettings> {
     let Some(path) = default_config_path() else {
-        return Ok(ThemeSet::default());
+        return Ok(AppSettings::default());
     };
 
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ThemeSet::default()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(AppSettings::default()),
         Err(e) => {
             return Err(e).with_context(|| format!("read config file {}", path.display()));
         }
@@ -118,9 +148,14 @@ fn try_load_themes() -> Result<ThemeSet> {
     let config: AppConfig = serde_json::from_str(&text)
         .with_context(|| format!("parse config file {} as JSON", path.display()))?;
 
-    Ok(ThemeSet {
-        dark: build_theme(&config.colors.dark, "colors.dark")?,
-        light: build_theme(&config.colors.light, "colors.light")?,
+    Ok(AppSettings {
+        themes: ThemeSet {
+            dark: build_theme(&config.colors.dark, "colors.dark")?,
+            light: build_theme(&config.colors.light, "colors.light")?,
+        },
+        show_hotkey: config.menu.show_hotkey,
+        max_title_length: config.menu.max_title_length,
+        max_combined_title_length: config.menu.max_combined_title_length,
     })
 }
 
@@ -239,6 +274,14 @@ fn default_inactive_monitor_border() -> String {
 
 fn default_empty() -> String {
     "#00000000".to_string()
+}
+
+fn default_max_title_length() -> usize {
+    64
+}
+
+fn default_max_combined_title_length() -> usize {
+    96
 }
 
 #[cfg(test)]
