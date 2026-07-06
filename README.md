@@ -121,7 +121,7 @@ Logs go to stderr; the log level can be tuned with `KOMOREBI_TRAY_LOG`, e.g.
 The app tracks Windows app mode (`AppsUseLightTheme`) and switches colors instantly when
 you switch between dark and light mode.
 
-You can override tray colors with a per-user config file at:
+You can override tray colors and configure a global hotkey to show the menu with a per-user config file at:
 `%APPDATA%\komorebi-tray-grid\config.json`
 
 On a typical system this resolves to:
@@ -153,9 +153,27 @@ the built-in defaults.
       "inactive_monitor_border": "#6A6A6AFF",
       "empty": "#00000000"
     }
+  },
+  "menu": {
+    "show_hotkey": "Ctrl+Alt+G",
+    "max_title_length": 64,
+    "max_combined_title_length": 96
   }
 }
 ```
+
+### Menu configuration
+
+The `menu` section allows customizing the tray context menu:
+
+- `show_hotkey` (optional string): A global keyboard shortcut to open the menu.
+  - Format: `Modifier+Key` or `Modifier+Modifier+Key`.
+  - Supported modifiers: `Ctrl`, `Alt`, `Shift`, `Win`.
+  - Supported keys: `A`-`Z`, `0`-`9`, `F1`-`F12`.
+  - Examples: `Ctrl+Shift+K`, `Alt+F1`, `Win+Alt+G`.
+  - If you have multiple monitors, pressing the hotkey repeatedly will cycle the menu across each monitor's tray icon.
+- `max_title_length` (optional integer, default `64`): Maximum length of an individual window title before it's ellipsized.
+- `max_combined_title_length` (optional integer, default `96`): Maximum length of the joined string of all window titles in a workspace menu item.
 
 `colors.non_empty` has been removed and is no longer used.
 All keys are under `colors.dark` and `colors.light`.
