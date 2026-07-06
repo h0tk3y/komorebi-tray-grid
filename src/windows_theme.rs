@@ -67,7 +67,7 @@ fn wait_for_personalize_change() -> Result<()> {
         RegOpenKeyExW(
             HKEY_CURRENT_USER,
             w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
-            Some(0),
+            0,
             KEY_NOTIFY,
             &mut key,
         )
