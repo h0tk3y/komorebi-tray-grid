@@ -12,4 +12,5 @@ pub mod komorebi;
 pub mod render;
 pub mod single_instance;
 pub mod tray;
+pub mod utils;
 pub mod windows_theme;
