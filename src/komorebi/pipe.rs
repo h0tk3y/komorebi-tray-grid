@@ -347,7 +347,7 @@ pub fn fetch_state() -> Result<WorldState> {
 /// resolves to `%LOCALAPPDATA%\komorebi\komorebi.sock` on Windows. Returned
 /// as `Option` so we can degrade gracefully if `LOCALAPPDATA` is somehow
 /// unset — in that case the watchdog disables itself rather than crashing.
-fn komorebi_socket_path() -> Option<PathBuf> {
+pub fn komorebi_socket_path() -> Option<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")?;
     Some(PathBuf::from(local).join("komorebi").join("komorebi.sock"))
 }

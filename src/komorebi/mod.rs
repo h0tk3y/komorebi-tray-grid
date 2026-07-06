@@ -7,6 +7,7 @@
 //! - [`pipe`] runs an async worker that subscribes to komorebi via a named
 //!   pipe and emits debounced [`state::WorldState`] snapshots.
 
+pub mod client;
 pub mod pipe;
 pub mod state;
 pub mod types;
