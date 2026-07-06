@@ -23,6 +23,18 @@ pub struct MonitorState {
     pub active: bool,
     /// Nine cells, row-major, top-left first.
     pub cells: [CellState; CELLS_PER_MONITOR],
+    /// Workspace metadata used for dynamic tray-menu entries.
+    pub menu_workspaces: Vec<WorkspaceMenuState>,
+    /// The monitor's `left` coordinate (from komorebi's `size` rect), used to
+    /// order monitors from left to right when cycling menus.
+    pub x: i32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceMenuState {
+    pub index: usize,
+    pub focused: bool,
+    pub window_titles: Vec<String>,
 }
 
 /// Snapshot of every monitor known to komorebi, in komorebi's reported order.
@@ -81,6 +93,19 @@ fn project_monitor(
         label: monitor_label(monitor),
         active,
         cells,
+        x: monitor.size.left,
+        menu_workspaces: monitor
+            .workspaces
+            .elements
+            .iter()
+            .enumerate()
+            .take(CELLS_PER_MONITOR)
+            .map(|(wi, ws)| WorkspaceMenuState {
+                index: wi,
+                focused: wi == focused_workspace,
+                window_titles: workspace_titles(ws),
+            })
+            .collect(),
     }
 }
 
@@ -90,7 +115,7 @@ fn project_workspace(
     ws: &types::Workspace,
 ) -> CellState {
     let containers = ws.containers.len();
-    let floating = json_collection_len(&ws.floating_windows);
+    let floating = ws.floating_windows.len();
     let has_monocle = ws.monocle_container.is_some();
     let has_maximized = ws.maximized_window.is_some();
     let extras = usize::from(has_monocle) + usize::from(has_maximized);
@@ -103,14 +128,27 @@ fn project_workspace(
     }
 }
 
-fn json_collection_len(v: &serde_json::Value) -> usize {
-    if let Some(arr) = v.get("elements").and_then(|e| e.as_array()) {
-        arr.len()
-    } else if let Some(arr) = v.as_array() {
-        arr.len()
-    } else {
-        0
+fn workspace_titles(ws: &types::Workspace) -> Vec<String> {
+    let mut titles = Vec::new();
+
+    for container in &ws.containers.elements {
+        titles.extend(types::container_titles(container));
     }
+
+    titles.extend(ws.floating_windows.titles());
+
+    if let Some(container) = &ws.monocle_container {
+        titles.extend(types::container_titles(container));
+    }
+
+    if let Some(window) = &ws.maximized_window {
+        let title = window.title.trim();
+        if !title.is_empty() {
+            titles.push(title.to_string());
+        }
+    }
+
+    titles
 }
 
 fn monitor_id(index: usize, monitor: &types::Monitor) -> String {

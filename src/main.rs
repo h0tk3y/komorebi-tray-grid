@@ -18,6 +18,12 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
 };
 use tray_icon::{menu::MenuEvent, TrayIconEvent};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    keybd_event, RegisterHotKey, HOT_KEY_MODIFIERS, KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL,
+    MOD_SHIFT, MOD_WIN, VK_ESCAPE,
+};
+use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+use windows::Win32::Foundation::HWND;
 
 use komorebi_tray_grid::app::App;
 use komorebi_tray_grid::autostart;
@@ -81,10 +87,23 @@ fn run() -> Result<()> {
 
     // The `App` (and its tray icons) must be created on the event-loop
     // thread, so defer construction to the `StartCause::Init` event.
-    let themes = config::load_themes();
+    let settings = config::load_settings();
     let mut scheme = windows_theme::current_scheme();
     spawn_windows_theme_watcher(proxy.clone()).context("spawn windows theme watcher thread")?;
     let mut app: Option<App> = None;
+    let mut current_monitor_index: usize = 0;
+
+    // Register the global hotkey on a dedicated thread with its own message
+    // loop. This is crucial: while a tray context menu is open, Windows runs a
+    // modal `TrackPopupMenu` loop on the event-loop thread which swallows
+    // `WM_HOTKEY` messages. A dedicated thread keeps receiving hotkey presses
+    // even while a menu is displayed, so we can dismiss the current menu and
+    // cycle to the next monitor immediately.
+    if let Some(hotkey_str) = settings.show_hotkey.clone() {
+        if let Err(e) = spawn_hotkey_listener(hotkey_str, proxy.clone()) {
+            tracing::error!(error = ?e, "failed to spawn hotkey listener thread");
+        }
+    }
 
     event_loop.run(move |event, _target, control_flow| {
         *control_flow = ControlFlow::Wait;
@@ -93,11 +112,42 @@ fn run() -> Result<()> {
             Event::NewEvents(StartCause::Init) => {
                 let initial_autostart = autostart::is_enabled();
                 tracing::debug!(initial_autostart, "initializing App on event-loop thread");
-                match App::new(initial_autostart, themes.for_scheme(scheme)) {
+                match App::new(
+                    initial_autostart,
+                    settings.themes.for_scheme(scheme),
+                    settings.max_title_length,
+                    settings.max_combined_title_length,
+                ) {
                     Ok(a) => app = Some(a),
                     Err(e) => {
                         tracing::error!(error = ?e, "failed to initialize App");
                         *control_flow = ControlFlow::Exit;
+                    }
+                }
+            }
+            Event::UserEvent(UserEvent::Hotkey { menu_was_visible }) => {
+                if let Some(a) = app.as_mut() {
+                    // Monitors are cycled left to right by their screen
+                    // coordinate rather than komorebi's arbitrary reporting
+                    // order, so repeated presses walk the displays predictably.
+                    let order = a.monitors_left_to_right();
+                    if !order.is_empty() {
+                        // Predictable behavior: a fresh press (no menu open)
+                        // always shows the currently focused monitor. Pressing
+                        // the hotkey again while a menu is already visible
+                        // advances to the next monitor to the right (wrapping
+                        // back to the leftmost).
+                        let index = if menu_was_visible {
+                            let pos = order
+                                .iter()
+                                .position(|&i| i == current_monitor_index)
+                                .unwrap_or(0);
+                            order[(pos + 1) % order.len()]
+                        } else {
+                            a.active_monitor_index().unwrap_or(order[0])
+                        };
+                        a.show_menu_for_monitor_index(index);
+                        current_monitor_index = index;
                     }
                 }
             }
@@ -109,22 +159,27 @@ fn run() -> Result<()> {
             Event::UserEvent(UserEvent::Menu(menu_event)) => {
                 if let Some(a) = app.as_mut() {
                     // Persist the requested autostart state to the registry;
-                    // the callback returns the actually-applied state so
-                    // `App` can resync the checkmark if the write failed.
-                    let mut autostart_callback = autostart::set_enabled;
-                    a.on_menu_event(menu_event, control_flow, &mut autostart_callback);
+                    // the App's state will be updated via callbacks.
+                    a.on_menu_event(
+                        menu_event,
+                        control_flow,
+                        &mut autostart::set_enabled,
+                        &autostart::is_enabled,
+                    );
                 }
             }
             Event::UserEvent(UserEvent::ColorSchemeChanged(new_scheme)) => {
                 if new_scheme != scheme {
                     scheme = new_scheme;
                     if let Some(a) = app.as_mut() {
-                        a.on_theme_changed(themes.for_scheme(new_scheme));
+                        a.on_theme_changed(settings.themes.for_scheme(new_scheme));
                     }
                 }
             }
-            Event::UserEvent(UserEvent::TrayIcon(_)) => {
-                // Left/double click are no-ops for v1 per spec.
+            Event::UserEvent(UserEvent::TrayIcon(tray_event)) => {
+                if let Some(a) = app.as_mut() {
+                    a.on_tray_event(tray_event);
+                }
             }
             Event::LoopDestroyed => {
                 tracing::info!("event loop destroyed");
@@ -228,4 +283,92 @@ fn default_log_path() -> std::path::PathBuf {
         .or_else(|| std::env::var_os("TEMP").map(std::path::PathBuf::from))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
     base.join("komorebi-tray-grid").join("komorebi-tray-grid.log")
+}
+
+/// Spawn a dedicated thread that owns the global hotkey registration and runs
+/// its own Win32 message loop.
+///
+/// `RegisterHotKey` delivers `WM_HOTKEY` to the thread that registered it. By
+/// registering on a separate thread (rather than the tao event-loop thread),
+/// hotkey presses keep arriving even while a tray context menu is open (the
+/// event-loop thread is then blocked inside a modal `TrackPopupMenu` loop).
+///
+/// On each press we forward a [`UserEvent::Hotkey`] to the event loop together
+/// with whether a menu was already visible. If one was, we first dismiss it (by
+/// injecting an `Esc` key press) and the event loop advances to the next
+/// monitor; otherwise the event loop opens the menu for the focused monitor.
+fn spawn_hotkey_listener(
+    hotkey_str: String,
+    proxy: tao::event_loop::EventLoopProxy<UserEvent>,
+) -> Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("hotkey-listener".into())
+        .spawn(move || {
+            if let Err(e) = register_hotkey(&hotkey_str) {
+                tracing::error!(error = %e, "failed to register hotkey");
+                return;
+            }
+
+            unsafe {
+                let mut msg = MSG::default();
+                // `GetMessageW` returns 0 on WM_QUIT and -1 on error.
+                while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+                    if msg.message == WM_HOTKEY {
+                        // If one of our tray menus is currently displayed, the
+                        // event-loop thread is blocked in a modal popup loop.
+                        // Injecting Esc dismisses that popup so the event loop
+                        // can resume and show the next monitor's menu. We also
+                        // forward whether a menu was visible so the event loop
+                        // can decide between the focused monitor and cycling.
+                        let menu_was_visible = komorebi_tray_grid::tray::MENU_VISIBLE
+                            .load(std::sync::atomic::Ordering::SeqCst);
+                        if menu_was_visible {
+                            keybd_event(VK_ESCAPE.0 as u8, 0, Default::default(), 0);
+                            keybd_event(VK_ESCAPE.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+                        }
+                        let _ = proxy.send_event(UserEvent::Hotkey { menu_was_visible });
+                    }
+                }
+            }
+        })
+        .map_err(Into::into)
+}
+
+fn register_hotkey(hotkey_str: &str) -> Result<()> {
+    let mut modifiers = HOT_KEY_MODIFIERS::default();
+    let mut vk = 0u32;
+
+    for part in hotkey_str.split('+') {
+        let part = part.trim().to_uppercase();
+        match part.as_str() {
+            "CTRL" | "CONTROL" => modifiers |= MOD_CONTROL,
+            "ALT" | "MENU" => modifiers |= MOD_ALT,
+            "SHIFT" => modifiers |= MOD_SHIFT,
+            "WIN" | "WINDOWS" | "SUPER" => modifiers |= MOD_WIN,
+            s if s.len() == 1 => {
+                vk = s.chars().next().unwrap() as u32;
+            }
+            s => {
+                // F1-F24
+                if s.starts_with('F') {
+                    if let Ok(num) = s[1..].parse::<u32>() {
+                        if (1..=24).contains(&num) {
+                            vk = 0x6F + num; // F1 is 0x70
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if vk == 0 {
+        return Err(anyhow::anyhow!("invalid hotkey: {}", hotkey_str));
+    }
+
+    unsafe {
+        RegisterHotKey(HWND(std::ptr::null_mut()), 1, modifiers, vk).context("RegisterHotKey")?;
+    }
+
+    tracing::info!(hotkey = %hotkey_str, "registered global hotkey");
+    Ok(())
 }

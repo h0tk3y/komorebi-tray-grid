@@ -5,22 +5,26 @@
 //! thread (tray-icon requires this on Windows; see the `tray-icon` README).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use tray_icon::{
     menu::Menu,
-    Icon, TrayIcon, TrayIconBuilder,
+    Icon, TrayIcon, TrayIconBuilder, TrayIconId,
 };
 
 use crate::komorebi::state::{MonitorState, WorldState};
 use crate::render::{paint_monitor_border_with_theme, render_grid_with_theme, Theme, ICON_SIZE};
 
+/// Tracks whether one of our tray context menus is currently displayed. Set
+/// right before we show a menu (via hotkey or tray click) and cleared as soon
+/// as the blocking `show_menu` call returns, i.e. the moment the popup closes.
+/// Read from the dedicated hotkey listener thread to decide whether an open
+/// popup must be dismissed before showing the next monitor's menu.
+pub static MENU_VISIBLE: AtomicBool = AtomicBool::new(false);
+
 /// Manages the lifecycle of all per-monitor tray icons.
 pub struct TrayManager {
-    /// Shared context menu attached to every tray icon. Cloning a `Menu`
-    /// in muda is reference-counted, so all icons see the same items and
-    /// the same checkmark state.
-    menu: Menu,
     /// Map from `MonitorState::id` → live `TrayIcon` handle. The order
     /// doesn't matter; we look up by id on every reconcile.
     icons: HashMap<String, TrayIcon>,
@@ -28,36 +32,30 @@ pub struct TrayManager {
 }
 
 impl TrayManager {
-    /// Build an empty manager that will use `menu` for every icon's
-    /// right-click context menu.
-    pub fn new(menu: Menu, theme: Theme) -> Self {
+    /// Build an empty manager.
+    pub fn new(theme: Theme) -> Self {
         Self {
-            menu,
             icons: HashMap::new(),
             theme,
         }
     }
 
-    /// Reconcile the live tray icons against `world`:
-    /// - existing monitors → update icon image + tooltip;
-    /// - new monitors → create a tray icon;
-    /// - monitors no longer reported → drop their icon (removes it from
-    ///   the system tray when the `TrayIcon` is dropped).
-    pub fn reconcile(&mut self, world: &WorldState) -> Result<()> {
+    /// Reconcile the live tray icons against `world`.
+    /// `get_menu` is a callback that provides a menu for a given monitor.
+    pub fn reconcile(
+        &mut self,
+        world: &WorldState,
+        mut get_menu: impl FnMut(&MonitorState) -> Menu,
+    ) -> Result<()> {
         let mut seen: HashSet<String> = HashSet::new();
 
-        // Stable creation order: sort by monitor ID. This ensures that even
-        // if komorebi reports monitors in a different order (or if some are
-        // added/removed), each monitor's tray icon gets a stable internal ID
-        // (uID) in Windows. Combined with a stable executable path, this
-        // helps Windows persist the user's visibility preferences (e.g.
-        // "always show") across app restarts.
         let mut monitors = world.monitors.clone();
         monitors.sort_by(|a, b| a.id.cmp(&b.id));
 
         for monitor in &monitors {
             seen.insert(monitor.id.clone());
-            self.upsert(monitor, monitor.active)
+            let menu = get_menu(monitor);
+            self.upsert(monitor, monitor.active, menu)
                 .with_context(|| format!("update tray icon for monitor {}", monitor.id))?;
         }
 
@@ -67,17 +65,22 @@ impl TrayManager {
         Ok(())
     }
 
-    pub fn set_theme(&mut self, theme: Theme, world: &WorldState) -> Result<()> {
+    pub fn set_theme(
+        &mut self,
+        theme: Theme,
+        world: &WorldState,
+        get_menu: impl FnMut(&MonitorState) -> Menu,
+    ) -> Result<()> {
         if self.theme == theme {
             return Ok(());
         }
         self.theme = theme;
-        self.reconcile(world)
+        self.reconcile(world, get_menu)
     }
 
     /// `active` controls the color of the always-drawn outer monitor
     /// border: `true` → focused (blue), `false` → non-empty (gray).
-    fn upsert(&mut self, monitor: &MonitorState, active: bool) -> Result<()> {
+    fn upsert(&mut self, monitor: &MonitorState, active: bool, menu: Menu) -> Result<()> {
         let mut rgba = render_grid_with_theme(&monitor.cells, &self.theme);
         paint_monitor_border_with_theme(&mut rgba, active, &self.theme);
         let icon = Icon::from_rgba(rgba, ICON_SIZE, ICON_SIZE)
@@ -91,13 +94,21 @@ impl TrayManager {
             existing
                 .set_tooltip(Some(tooltip))
                 .context("set tray icon tooltip")?;
+            existing.set_menu(Some(Box::new(menu)));
             return Ok(());
         }
 
         let id = format!("komorebi-tray-grid-{}", monitor.id);
         let tray = TrayIconBuilder::new()
             .with_id(id)
-            .with_menu(Box::new(self.menu.clone()))
+            // We drive the context menu ourselves via `show_menu` so we can
+            // observe exactly when it closes (the Win32 `TrackPopupMenu` call
+            // blocks until dismissal). Letting `tray-icon` auto-open the menu
+            // on click would hide that return point and force us back onto a
+            // timeout to detect the close.
+            .with_menu_on_left_click(false)
+            .with_menu_on_right_click(false)
+            .with_menu(Box::new(menu))
             .with_tooltip(tooltip)
             .with_icon(icon)
             .build()
@@ -120,6 +131,37 @@ impl TrayManager {
     /// `true` if no icons are currently shown.
     pub fn is_empty(&self) -> bool {
         self.icons.is_empty()
+    }
+
+    /// Show the context menu for the given monitor ID.
+    ///
+    /// On Windows this blocks inside `TrackPopupMenu` until the menu is
+    /// dismissed, so the caller can treat the return as a precise
+    /// "menu closed" signal.
+    pub fn show_menu(&self, monitor_id: &str) -> Result<()> {
+        if let Some(tray) = self.icons.get_now(monitor_id) {
+            tray.show_menu();
+        }
+        Ok(())
+    }
+
+    /// Resolve the `MonitorState::id` that owns the given tray icon id, used to
+    /// map an incoming tray click back to the monitor whose menu should open.
+    pub fn monitor_id_for_tray(&self, tray_id: &TrayIconId) -> Option<String> {
+        self.icons
+            .iter()
+            .find(|(_, icon)| icon.id() == tray_id)
+            .map(|(monitor_id, _)| monitor_id.clone())
+    }
+}
+
+trait HashMapExt {
+    fn get_now(&self, key: &str) -> Option<&TrayIcon>;
+}
+
+impl HashMapExt for HashMap<String, TrayIcon> {
+    fn get_now(&self, key: &str) -> Option<&TrayIcon> {
+        self.get(key)
     }
 }
 
