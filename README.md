@@ -17,13 +17,89 @@ Per-cell visuals:
 | focused workspace                           | bright blue fill (overrides gray tiers)      |
 | workspace contains a full-screen container  | yellow border (composes with the fill above) |
 
-Right-clicking any tray icon opens the same menu, with:
-
-- **Enable autostart** — toggle a per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-  entry pointing at the running executable, so the app launches on logon.
-- **Quit** — terminate the app and remove all tray icons.
-
 See [`spec.md`](spec.md) for the original spec and [`plan.md`](plan.md) for the design plan.
+
+## Usage
+
+`komorebi` must be installed and running. Start komorebi as usual, then launch:
+
+```powershell
+.\target\release\komorebi-tray-grid.exe
+```
+
+### Tray Menu
+
+Right-clicking any tray icon (or using the global hotkey) opens a menu where you can:
+
+- **Switch workspaces**: Click a workspace item to focus it. The menu lists window titles for each workspace; the currently focused workspace is marked with a checkmark.
+- **Enable autostart** — Toggle a per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
+  entry so the app launches on logon.
+- **Quit** — Terminate the app and remove all tray icons.
+
+Logs go to stderr; the log level can be tuned with `KOMOREBI_TRAY_LOG`, e.g.
+`$env:KOMOREBI_TRAY_LOG = "debug"`.
+
+## Configuration
+
+The app can be customized with a JSON config file at:
+`%APPDATA%\komorebi-tray-grid\config.json`
+
+(Typically `C:\Users\<your-user>\AppData\Roaming\komorebi-tray-grid\config.json`)
+
+If the file is missing or invalid, the app falls back to built-in defaults.
+
+### Example Configuration
+
+```json
+{
+  "colors": {
+    "dark": {
+      "focused": "#2E9BFFFF",
+      "non_empty_1": "#6B6B6BFF",
+      "non_empty_2": "#8C8C8CFF",
+      "non_empty_3_plus": "#B0B0B0FF",
+      "full_screen_border": "#FFD500FF",
+      "active_monitor_border": "#2E9BFFFF",
+      "inactive_monitor_border": "#8C8C8CFF",
+      "empty": "#00000000"
+    },
+    "light": {
+      "focused": "#0067C0FF",
+      "non_empty_1": "#868686FF",
+      "non_empty_2": "#6A6A6AFF",
+      "non_empty_3_plus": "#4F4F4FFF",
+      "full_screen_border": "#C7A000FF",
+      "active_monitor_border": "#0067C0FF",
+      "inactive_monitor_border": "#6A6A6AFF",
+      "empty": "#00000000"
+    }
+  },
+  "menu": {
+    "show_hotkey": "Ctrl+Alt+G",
+    "max_title_length": 64,
+    "max_combined_title_length": 96
+  }
+}
+```
+
+### Colors
+
+The app tracks Windows app mode (`AppsUseLightTheme`) and switches colors instantly between dark and light mode.
+
+- **Keys**: All keys must be under `colors.dark` and `colors.light`.
+- **Format**: Supported formats are `#RRGGBB` (alpha defaults to `FF`) and `#RRGGBBAA`.
+- **Note**: `colors.non_empty` has been removed and is no longer used.
+
+### Menu & Global Hotkey
+
+- `show_hotkey` (optional string): A global keyboard shortcut to open the menu.
+  - **Format**: `Modifier+Key` or `Modifier+Modifier+Key`.
+  - **Modifiers**: `Ctrl`, `Alt`, `Shift`, `Win`.
+  - **Keys**: `A`-`Z`, `0`-`9`, `F1`-`F12`.
+  - **Examples**: `Ctrl+Shift+K`, `Alt+F1`, `Win+Alt+G`.
+  - If you have multiple monitors, pressing the hotkey repeatedly will cycle the menu across each monitor's tray icon.
+- `max_title_length` (optional integer, default `64`): Maximum length of an individual window title before it's ellipsized.
+- `max_combined_title_length` (optional integer, default `96`): Maximum length of the joined string of all window titles in a workspace menu item.
 
 ## Status
 
@@ -32,6 +108,30 @@ renderer, komorebi event worker, per-monitor tray icons, right-click menu with t
 toggle, single-instance guard, interactive tray menu, and a CI-built NSIS installer — and tagged as `v0.4.0`. See the
 [releases page](https://github.com/h0tk3y/komorebi-tray-grid/releases) for prebuilt binaries.
 Expect rough edges; bug reports and PRs are welcome.
+
+## Releases
+
+Prebuilt binaries are published on the
+[GitHub releases page](https://github.com/h0tk3y/komorebi-tray-grid/releases).
+
+Tagged pushes (`v*`) trigger
+[`.github/workflows/release.yml`](.github/workflows/release.yml), which builds on
+`windows-latest`, runs tests, and uploads both a zipped portable `.exe` and the
+NSIS `*-setup.exe` installer as release assets.
+
+## How it works
+
+The app talks to komorebi directly over its AF_UNIX socket via the
+[`komorebi-client`](https://github.com/LGUG2Z/komorebi/tree/master/komorebi-client) crate, so
+`komorebic.exe` doesn't need to be on `PATH`. On startup it:
+
+1. Acquires a `Global\komorebi-tray-grid` named mutex so only one instance can run.
+2. Queries `SocketMessage::State` to seed the initial UI.
+3. Calls `komorebi_client::subscribe(<unique name>)` to register a per-process subscriber
+   socket under `%LOCALAPPDATA%\komorebi\`.
+4. Adds one tray icon per monitor reported by komorebi and updates it on every notification,
+   coalescing bursts (~50 ms debounce) into a fresh `State` query.
+5. If the subscription breaks, re-subscribes with exponential backoff and re-queries state.
 
 ## Build
 
@@ -92,100 +192,3 @@ with a High-IL token that komorebi (Medium-IL) cannot write events into.
 Installer settings live under `[package.metadata.packager]` in
 [`Cargo.toml`](Cargo.toml); to additionally build a `.msi`, add
 `"wix"` to the `formats` array.
-
-## Run
-
-`komorebi` must be installed and running. Start komorebi as usual, then launch:
-
-```powershell
-.\target\release\komorebi-tray-grid.exe
-```
-
-The app talks to komorebi directly over its AF_UNIX socket via the
-[`komorebi-client`](https://github.com/LGUG2Z/komorebi/tree/master/komorebi-client) crate, so
-`komorebic.exe` doesn't need to be on `PATH`. On startup it:
-
-1. Acquires a `Global\komorebi-tray-grid` named mutex so only one instance can run.
-2. Queries `SocketMessage::State` to seed the initial UI.
-3. Calls `komorebi_client::subscribe(<unique name>)` to register a per-process subscriber
-   socket under `%LOCALAPPDATA%\komorebi\`.
-4. Adds one tray icon per monitor reported by komorebi and updates it on every notification,
-   coalescing bursts (~50 ms debounce) into a fresh `State` query.
-5. If the subscription breaks, re-subscribes with exponential backoff and re-queries state.
-
-Logs go to stderr; the log level can be tuned with `KOMOREBI_TRAY_LOG`, e.g.
-`$env:KOMOREBI_TRAY_LOG = "debug"`.
-
-### Color customization
-
-The app tracks Windows app mode (`AppsUseLightTheme`) and switches colors instantly when
-you switch between dark and light mode.
-
-You can override tray colors and configure a global hotkey to show the menu with a per-user config file at:
-`%APPDATA%\komorebi-tray-grid\config.json`
-
-On a typical system this resolves to:
-`C:\Users\<your-user>\AppData\Roaming\komorebi-tray-grid\config.json`
-
-If the file is missing (or invalid), the app logs a warning and falls back to
-the built-in defaults.
-
-```json
-{
-  "colors": {
-    "dark": {
-      "focused": "#2E9BFFFF",
-      "non_empty_1": "#6B6B6BFF",
-      "non_empty_2": "#8C8C8CFF",
-      "non_empty_3_plus": "#B0B0B0FF",
-      "full_screen_border": "#FFD500FF",
-      "active_monitor_border": "#2E9BFFFF",
-      "inactive_monitor_border": "#8C8C8CFF",
-      "empty": "#00000000"
-    },
-    "light": {
-      "focused": "#0067C0FF",
-      "non_empty_1": "#868686FF",
-      "non_empty_2": "#6A6A6AFF",
-      "non_empty_3_plus": "#4F4F4FFF",
-      "full_screen_border": "#C7A000FF",
-      "active_monitor_border": "#0067C0FF",
-      "inactive_monitor_border": "#6A6A6AFF",
-      "empty": "#00000000"
-    }
-  },
-  "menu": {
-    "show_hotkey": "Ctrl+Alt+G",
-    "max_title_length": 64,
-    "max_combined_title_length": 96
-  }
-}
-```
-
-### Menu configuration
-
-The `menu` section allows customizing the tray context menu:
-
-- `show_hotkey` (optional string): A global keyboard shortcut to open the menu.
-  - Format: `Modifier+Key` or `Modifier+Modifier+Key`.
-  - Supported modifiers: `Ctrl`, `Alt`, `Shift`, `Win`.
-  - Supported keys: `A`-`Z`, `0`-`9`, `F1`-`F12`.
-  - Examples: `Ctrl+Shift+K`, `Alt+F1`, `Win+Alt+G`.
-  - If you have multiple monitors, pressing the hotkey repeatedly will cycle the menu across each monitor's tray icon.
-- `max_title_length` (optional integer, default `64`): Maximum length of an individual window title before it's ellipsized.
-- `max_combined_title_length` (optional integer, default `96`): Maximum length of the joined string of all window titles in a workspace menu item.
-
-`colors.non_empty` has been removed and is no longer used.
-All keys are under `colors.dark` and `colors.light`.
-
-Supported formats are `#RRGGBB` (alpha defaults to `FF`) and `#RRGGBBAA`.
-
-## Releases
-
-Prebuilt binaries are published on the
-[GitHub releases page](https://github.com/h0tk3y/komorebi-tray-grid/releases).
-
-Tagged pushes (`v*`) trigger
-[`.github/workflows/release.yml`](.github/workflows/release.yml), which builds on
-`windows-latest`, runs tests, and uploads both a zipped portable `.exe` and the
-NSIS `*-setup.exe` installer as release assets.
