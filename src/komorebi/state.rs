@@ -70,11 +70,7 @@ impl From<types::State> for WorldState {
     }
 }
 
-fn project_monitor(
-    index: usize,
-    monitor: &types::Monitor,
-    active: bool,
-) -> MonitorState {
+fn project_monitor(index: usize, monitor: &types::Monitor, active: bool) -> MonitorState {
     let mut cells = [CellState::EMPTY; CELLS_PER_MONITOR];
     let focused_workspace = monitor.workspaces.focused;
 
@@ -109,11 +105,7 @@ fn project_monitor(
     }
 }
 
-fn project_workspace(
-    index: usize,
-    focused_workspace: usize,
-    ws: &types::Workspace,
-) -> CellState {
+fn project_workspace(index: usize, focused_workspace: usize, ws: &types::Workspace) -> CellState {
     let containers = ws.containers.len();
     let floating = ws.floating_windows.len();
     let has_monocle = ws.monocle_container.is_some();

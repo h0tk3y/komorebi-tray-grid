@@ -243,8 +243,8 @@ fn subscribe_loop(state_tx: &Sender<WorldState>) -> Result<SessionEnd> {
     let name = subscription_name();
     tracing::debug!(socket = %name, "subscribing to komorebi");
 
-    let listener = subscribe(&name)
-        .with_context(|| format!("subscribe to komorebi (socket {name})"))?;
+    let listener =
+        subscribe(&name).with_context(|| format!("subscribe to komorebi (socket {name})"))?;
 
     tracing::debug!(socket = %name, "subscribed; awaiting notifications");
 
@@ -279,9 +279,7 @@ fn subscribe_loop(state_tx: &Sender<WorldState>) -> Result<SessionEnd> {
         // notification may have raced ahead of the watchdog poke (e.g.
         // komorebi already started broadcasting before we returned).
         if restart.swap(false, Ordering::SeqCst) {
-            tracing::debug!(
-                "watchdog requested re-subscribe; tearing down current session",
-            );
+            tracing::debug!("watchdog requested re-subscribe; tearing down current session",);
             return Ok(SessionEnd::WatchdogTriggered);
         }
 
@@ -335,10 +333,9 @@ fn push_fresh_state(tx: &Sender<WorldState>) -> bool {
 /// into a [`WorldState`]. Used to seed the UI on startup and to refresh
 /// after a reconnect — never on the per-notification hot path.
 pub fn fetch_state() -> Result<WorldState> {
-    let raw = send_query(&SocketMessage::State)
-        .context("query komorebi state (is komorebi running?)")?;
-    let parsed: types::State =
-        serde_json::from_str(&raw).context("parse komorebi state JSON")?;
+    let raw =
+        send_query(&SocketMessage::State).context("query komorebi state (is komorebi running?)")?;
+    let parsed: types::State = serde_json::from_str(&raw).context("parse komorebi state JSON")?;
     Ok(WorldState::from(&parsed))
 }
 
@@ -398,9 +395,7 @@ impl WatchdogHandle {
                 // No LOCALAPPDATA → degrade to no-op watchdog. The
                 // subscribe loop still works for as long as komorebi
                 // stays up; restart-recovery just won't happen.
-                tracing::warn!(
-                    "LOCALAPPDATA not set; komorebi-restart watchdog disabled",
-                );
+                tracing::warn!("LOCALAPPDATA not set; komorebi-restart watchdog disabled",);
                 return Self {
                     stop_tx: None,
                     join: None,
@@ -410,9 +405,7 @@ impl WatchdogHandle {
         let our_socket_path = match subscriber_socket_path(&subscription_name) {
             Some(p) => p,
             None => {
-                tracing::warn!(
-                    "LOCALAPPDATA not set; komorebi-restart watchdog disabled",
-                );
+                tracing::warn!("LOCALAPPDATA not set; komorebi-restart watchdog disabled",);
                 return Self {
                     stop_tx: None,
                     join: None,
@@ -423,9 +416,7 @@ impl WatchdogHandle {
         let (stop_tx, stop_rx) = channel::<()>();
         let join = thread::Builder::new()
             .name("komorebi-watchdog".into())
-            .spawn(move || {
-                watchdog_thread(socket_path, our_socket_path, restart, stop_rx)
-            })
+            .spawn(move || watchdog_thread(socket_path, our_socket_path, restart, stop_rx))
             .ok();
 
         if join.is_none() {
@@ -486,14 +477,10 @@ fn watchdog_thread(
         let now_alive = komorebi_is_alive(&komorebi_socket);
         match (was_alive, now_alive) {
             (true, false) => {
-                tracing::info!(
-                    "komorebi appears to be down; will re-subscribe when it comes back",
-                );
+                tracing::info!("komorebi appears to be down; will re-subscribe when it comes back",);
             }
             (false, true) => {
-                tracing::info!(
-                    "komorebi is back up; triggering worker re-subscribe",
-                );
+                tracing::info!("komorebi is back up; triggering worker re-subscribe",);
                 // 1) Tell the worker to bail out on its next accept().
                 restart.store(true, Ordering::SeqCst);
                 // 2) Wake the blocked accept() via a self-connect. Errors

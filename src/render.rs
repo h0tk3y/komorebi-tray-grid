@@ -338,7 +338,10 @@ mod tests {
         }
         // One pixel inside the rim stays transparent (still empty grid).
         assert_eq!(pixel_at(&buf, 1, 1), COLOR_TRANSPARENT);
-        assert_eq!(pixel_at(&buf, ICON_SIZE - 2, ICON_SIZE - 2), COLOR_TRANSPARENT);
+        assert_eq!(
+            pixel_at(&buf, ICON_SIZE - 2, ICON_SIZE - 2),
+            COLOR_TRANSPARENT
+        );
     }
 
     #[test]

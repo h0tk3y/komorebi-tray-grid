@@ -116,11 +116,7 @@ impl WindowCollection {
 
     pub fn titles(&self) -> Vec<String> {
         match self {
-            Self::Ring(ring) => ring
-                .elements
-                .iter()
-                .filter_map(window_title)
-                .collect(),
+            Self::Ring(ring) => ring.elements.iter().filter_map(window_title).collect(),
             Self::Array(windows) => windows.iter().filter_map(window_title).collect(),
             Self::Other(_) => Vec::new(),
         }
@@ -213,8 +209,7 @@ mod tests {
 
     #[test]
     fn ring_tolerates_missing_focused() {
-        let v: Ring<i32> =
-            serde_json::from_value(json!({ "elements": [1, 2] })).unwrap();
+        let v: Ring<i32> = serde_json::from_value(json!({ "elements": [1, 2] })).unwrap();
         assert_eq!(v.focused, 0);
     }
 

@@ -15,10 +15,10 @@ fn load(name: &str) -> WorldState {
         .join("fixtures")
         .join("komorebi")
         .join(name);
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let parsed: types::State = serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let parsed: types::State =
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
     WorldState::from(&parsed)
 }
 

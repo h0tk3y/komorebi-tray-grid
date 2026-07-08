@@ -8,10 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
-use tray_icon::{
-    menu::Menu,
-    Icon, TrayIcon, TrayIconBuilder, TrayIconId,
-};
+use tray_icon::{menu::Menu, Icon, TrayIcon, TrayIconBuilder, TrayIconId};
 
 use crate::komorebi::state::{MonitorState, WorldState};
 use crate::render::{paint_monitor_border_with_theme, render_grid_with_theme, Theme, ICON_SIZE};
@@ -141,6 +138,17 @@ impl TrayManager {
     pub fn show_menu(&self, monitor_id: &str) -> Result<()> {
         if let Some(tray) = self.icons.get_now(monitor_id) {
             tray.show_menu();
+            // `tray-icon` invokes `TrackPopupMenu` *without* `TPM_RETURNCMD`, so
+            // a menu selection is delivered as a `WM_COMMAND` that is merely
+            // *posted* to the tray window's queue and dispatched later by the
+            // event loop. Our caller reconciles the tray immediately after this
+            // returns, and reconciling replaces (and destroys) the menu that was
+            // just shown. If the `WM_COMMAND` is still sitting in the queue at
+            // that point, `muda` can no longer resolve the clicked item and the
+            // `MenuEvent` is silently dropped — so the workspace switch does
+            // nothing. Drain those pending menu messages now, while the menu is
+            // still alive, so the selection is always delivered.
+            unsafe { drain_pending_menu_messages() };
         }
         Ok(())
     }
@@ -152,6 +160,22 @@ impl TrayManager {
             .iter()
             .find(|(_, icon)| icon.id() == tray_id)
             .map(|(monitor_id, _)| monitor_id.clone())
+    }
+}
+
+/// Dispatch any `WM_COMMAND` messages currently queued on this (event-loop)
+/// thread. Used right after a popup menu closes to force delivery of a menu
+/// selection before the menu is reconciled away. Only menu-command messages are
+/// pulled from the queue; everything else is left untouched for the normal
+/// event loop to handle.
+unsafe fn drain_pending_menu_messages() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_COMMAND,
+    };
+    let mut msg = MSG::default();
+    while PeekMessageW(&mut msg, None, WM_COMMAND, WM_COMMAND, PM_REMOVE).as_bool() {
+        let _ = TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
 }
 

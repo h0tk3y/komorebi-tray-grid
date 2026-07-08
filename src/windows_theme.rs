@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use tao::event_loop::EventLoopProxy;
 use windows::core::w;
 use windows::Win32::System::Registry::{
-    HKEY, RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY_CURRENT_USER, KEY_NOTIFY,
+    RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_NOTIFY,
     REG_NOTIFY_CHANGE_LAST_SET,
 };
 use winreg::enums::HKEY_CURRENT_USER as HKEY_CURRENT_USER_WINREG;
@@ -52,7 +52,10 @@ pub fn spawn_watcher(proxy: EventLoopProxy<UserEvent>) -> Result<thread::JoinHan
                 let scheme = current_scheme();
                 if scheme != last_scheme {
                     last_scheme = scheme;
-                    if proxy.send_event(UserEvent::ColorSchemeChanged(scheme)).is_err() {
+                    if proxy
+                        .send_event(UserEvent::ColorSchemeChanged(scheme))
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -75,18 +78,11 @@ fn wait_for_personalize_change() -> Result<()> {
     .ok()
     .context("open HKCU\\...\\Themes\\Personalize for change notifications")?;
 
-    let notify_result = unsafe {
-        RegNotifyChangeKeyValue(
-            key,
-            false,
-            REG_NOTIFY_CHANGE_LAST_SET,
-            None,
-            false,
-        )
-    }
-    .ok()
-    .context("wait for theme registry change")
-    .map(|_| ());
+    let notify_result =
+        unsafe { RegNotifyChangeKeyValue(key, false, REG_NOTIFY_CHANGE_LAST_SET, None, false) }
+            .ok()
+            .context("wait for theme registry change")
+            .map(|_| ());
 
     let _ = unsafe { RegCloseKey(key) };
     notify_result

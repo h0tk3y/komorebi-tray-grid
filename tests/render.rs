@@ -46,8 +46,7 @@ fn assert_snapshot(name: &str, rgba: &[u8]) {
     let regen = std::env::var_os("KOMOREBI_TRAY_GRID_REGEN").is_some();
 
     if regen || !path.exists() {
-        std::fs::create_dir_all(path.parent().unwrap())
-            .expect("create fixtures directory");
+        std::fs::create_dir_all(path.parent().unwrap()).expect("create fixtures directory");
         let img = image::RgbaImage::from_raw(ICON_SIZE, ICON_SIZE, rgba.to_vec())
             .expect("RGBA buffer must match ICON_SIZE × ICON_SIZE");
         img.save(&path).expect("write fixture PNG");
@@ -105,10 +104,7 @@ fn snapshot_single_non_empty() {
 fn snapshot_focused_full_screen() {
     let mut states = [(false, 0, false); 9];
     states[4] = (true, 1, true); // center: focused + maximized
-    assert_snapshot(
-        "focused_full_screen.png",
-        &render_grid(&cells_from(states)),
-    );
+    assert_snapshot("focused_full_screen.png", &render_grid(&cells_from(states)));
 }
 
 #[test]

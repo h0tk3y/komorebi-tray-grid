@@ -161,7 +161,11 @@ fn try_load_settings() -> Result<AppSettings> {
 
 fn default_config_path() -> Option<PathBuf> {
     let app_data = env::var_os("APPDATA")?;
-    Some(PathBuf::from(app_data).join("komorebi-tray-grid").join("config.json"))
+    Some(
+        PathBuf::from(app_data)
+            .join("komorebi-tray-grid")
+            .join("config.json"),
+    )
 }
 
 fn build_theme(config: &ColorConfig, scope: &str) -> Result<Theme> {
@@ -290,12 +294,18 @@ mod tests {
 
     #[test]
     fn parse_rgb_assumes_opaque_alpha() {
-        assert_eq!(parse_hex_color("#112233").unwrap(), [0x11, 0x22, 0x33, 0xFF]);
+        assert_eq!(
+            parse_hex_color("#112233").unwrap(),
+            [0x11, 0x22, 0x33, 0xFF]
+        );
     }
 
     #[test]
     fn parse_rgba_uses_given_alpha() {
-        assert_eq!(parse_hex_color("#11223344").unwrap(), [0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(
+            parse_hex_color("#11223344").unwrap(),
+            [0x11, 0x22, 0x33, 0x44]
+        );
     }
 
     #[test]

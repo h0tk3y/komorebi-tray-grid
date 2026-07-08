@@ -10,9 +10,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use komorebi_client::SocketMessage;
 use tao::event_loop::ControlFlow;
-use tray_icon::menu::{
-    CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem,
-};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 
 use crate::komorebi::client::send_command;
 use crate::komorebi::state::{MonitorState, WorldState};
@@ -29,8 +27,8 @@ pub struct App {
     initial_autostart: bool,
     max_title_length: usize,
     max_combined_title_length: usize,
-    /// Maps menu item ID to (monitor_index, workspace_index)
-    workspace_items: HashMap<MenuId, (usize, usize)>,
+    /// Maps menu item ID to (stable_monitor_id, workspace_index)
+    workspace_items: HashMap<MenuId, (String, usize)>,
     /// Instant when the menu was last opened, used to defer updates
     /// that might dismiss the menu.
     menu_opened_at: Option<std::time::Instant>,
@@ -40,7 +38,12 @@ pub struct App {
 
 impl App {
     /// Build the [`TrayManager`] and seed the initial autostart state.
-    pub fn new(initial_autostart: bool, theme: Theme, max_title_length: usize, max_combined_title_length: usize) -> Result<Self> {
+    pub fn new(
+        initial_autostart: bool,
+        theme: Theme,
+        max_title_length: usize,
+        max_combined_title_length: usize,
+    ) -> Result<Self> {
         Ok(Self {
             world: WorldState::default(),
             tray: TrayManager::new(theme),
@@ -84,12 +87,11 @@ impl App {
     pub fn on_theme_changed(&mut self, theme: Theme) {
         self.workspace_items.clear();
         let mut workspace_items = HashMap::new();
-        let world = self.world.clone();
         let max_title_length = self.max_title_length;
         let max_combined_title_length = self.max_combined_title_length;
+        let world = self.world.clone();
         if let Err(e) = self.tray.set_theme(theme, &world, |m| {
             build_menu_for_monitor(
-                &world,
                 m,
                 &mut workspace_items,
                 self.autostart_item_id.clone(),
@@ -130,12 +132,11 @@ impl App {
 
     fn reconcile_tray(&mut self) {
         let mut workspace_items = HashMap::new();
-        let world = self.world.clone();
         let max_title_length = self.max_title_length;
         let max_combined_title_length = self.max_combined_title_length;
+        let world = self.world.clone();
         if let Err(e) = self.tray.reconcile(&world, |m| {
             build_menu_for_monitor(
-                &world,
                 m,
                 &mut workspace_items,
                 self.autostart_item_id.clone(),
@@ -168,10 +169,51 @@ impl App {
     }
 }
 
+/// Parse a workspace menu-item id back into its stable monitor identity and
+/// workspace index.
+///
+/// New ids use a hex-encoded monitor id so the selection can be resolved
+/// against the current komorebi world even if the monitor order changes while
+/// the menu is open. Older numeric ids are still accepted for compatibility.
+fn parse_workspace_menu_id(id: &str) -> Option<(String, usize)> {
+    let rest = id.strip_prefix("ws-")?;
+    let (monitor, workspace) = rest.split_once('-')?;
+
+    if let Some(encoded) = monitor.strip_prefix('h') {
+        return Some((decode_hex(encoded)?, workspace.parse().ok()?));
+    }
+
+    Some((monitor.to_string(), workspace.parse().ok()?))
+}
+
+fn encode_monitor_id(monitor_id: &str) -> String {
+    let mut out = String::with_capacity(monitor_id.len() * 2);
+    for byte in monitor_id.as_bytes() {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{:02x}", byte);
+    }
+    out
+}
+
+fn decode_hex(input: &str) -> Option<String> {
+    if input.len() % 2 != 0 {
+        return None;
+    }
+
+    let mut bytes = Vec::with_capacity(input.len() / 2);
+    let mut iter = input.as_bytes().chunks_exact(2);
+    for pair in &mut iter {
+        let hi = (pair[0] as char).to_digit(16)? as u8;
+        let lo = (pair[1] as char).to_digit(16)? as u8;
+        bytes.push((hi << 4) | lo);
+    }
+
+    String::from_utf8(bytes).ok()
+}
+
 fn build_menu_for_monitor(
-    world: &WorldState,
     monitor: &MonitorState,
-    workspace_items: &mut HashMap<MenuId, (usize, usize)>,
+    workspace_items: &mut HashMap<MenuId, (String, usize)>,
     autostart_item_id: MenuId,
     quit_item_id: MenuId,
     initial_autostart: bool,
@@ -180,9 +222,6 @@ fn build_menu_for_monitor(
 ) -> Menu {
     let menu = Menu::new();
 
-    // Monitor Index
-    let monitor_index = world.monitors.iter().position(|m| m.id == monitor.id).unwrap_or(0);
-
     // Workspaces
     for ws in &monitor.menu_workspaces {
         if !ws.focused && ws.window_titles.is_empty() {
@@ -190,24 +229,38 @@ fn build_menu_for_monitor(
         }
 
         let digit = ws.index + 1;
-        let base_label = if ws.focused {
-            format!("*&{}.", digit)
-        } else {
-            format!("&{}.", digit)
-        };
+        let base_label = format!("&{}.", digit);
 
         let label = if ws.window_titles.is_empty() {
             base_label
         } else {
-            let titles_joined = ws.window_titles.iter()
+            let titles_joined = ws
+                .window_titles
+                .iter()
                 .map(|t| ellipsize(t, max_title_length))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{} {}", base_label, ellipsize(&titles_joined, max_combined_title_length))
+            format!(
+                "{} {}",
+                base_label,
+                ellipsize(&titles_joined, max_combined_title_length)
+            )
         };
 
-        let item = MenuItem::with_id(MenuId::new(format!("ws-{}-{}", monitor_index, ws.index)), label, true, None);
-        workspace_items.insert(item.id().clone(), (monitor_index, ws.index));
+        // Use the native Windows menu-item marker (a checkmark) to indicate the
+        // focused workspace, rather than drawing our own Unicode glyph.
+        let item = CheckMenuItem::with_id(
+            MenuId::new(format!(
+                "ws-h{}-{}",
+                encode_monitor_id(&monitor.id),
+                ws.index
+            )),
+            label,
+            true,
+            ws.focused,
+            None,
+        );
+        workspace_items.insert(item.id().clone(), (monitor.id.clone(), ws.index));
         let _ = menu.append(&item);
     }
 
@@ -229,7 +282,6 @@ fn build_menu_for_monitor(
 }
 
 impl App {
-
     /// Handle a menu activation.
     pub fn on_menu_event(
         &mut self,
@@ -259,11 +311,35 @@ impl App {
             return;
         }
 
-        if let Some(&(m_idx, ws_idx)) = self.workspace_items.get(&event.id) {
-            tracing::info!(monitor = m_idx, workspace = ws_idx, "switching workspace via menu");
-            let msg = SocketMessage::FocusMonitorWorkspaceNumber(m_idx, ws_idx);
-            if let Err(e) = send_command(msg) {
-                tracing::error!(error = %e, "failed to send focus command");
+        // Resolve the clicked workspace. Prefer the map populated when the menu
+        // was built, but fall back to parsing the deterministic id: reconciling
+        // the tray on close rebuilds `workspace_items`, and if the buffered
+        // state no longer renders that workspace (e.g. it became empty) the map
+        // entry disappears even though the user did click it.
+        if let Some((monitor_id, ws_idx)) = self
+            .workspace_items
+            .get(&event.id)
+            .cloned()
+            .or_else(|| parse_workspace_menu_id(event.id.as_ref()))
+        {
+            if let Some(monitor_index) = self.world.monitors.iter().position(|m| m.id == monitor_id)
+            {
+                tracing::info!(
+                    monitor = %monitor_id,
+                    monitor_index,
+                    workspace = ws_idx,
+                    "switching workspace via menu"
+                );
+                let msg = SocketMessage::FocusMonitorWorkspaceNumber(monitor_index, ws_idx);
+                if let Err(e) = send_command(msg) {
+                    tracing::error!(error = %e, "failed to send focus command");
+                }
+            } else {
+                tracing::warn!(
+                    monitor = %monitor_id,
+                    workspace = ws_idx,
+                    "clicked workspace menu item but the monitor no longer exists"
+                );
             }
         }
     }
@@ -312,7 +388,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::komorebi::state::{WorldState, MonitorState, WorkspaceMenuState};
+    use crate::komorebi::state::{MonitorState, WorkspaceMenuState, WorldState};
     use crate::render::Theme;
 
     #[test]
@@ -324,18 +400,31 @@ mod tests {
         let monitor = MonitorState {
             id: "m1".into(),
             menu_workspaces: vec![
-                WorkspaceMenuState { index: 0, focused: false, window_titles: vec!["Win1".into()] },
-                WorkspaceMenuState { index: 1, focused: false, window_titles: vec![] }, // Should be filtered
-                WorkspaceMenuState { index: 2, focused: true, window_titles: vec![] },  // Focused, should NOT be filtered
-                WorkspaceMenuState { index: 3, focused: false, window_titles: vec!["Win2".into()] },
+                WorkspaceMenuState {
+                    index: 0,
+                    focused: false,
+                    window_titles: vec!["Win1".into()],
+                },
+                WorkspaceMenuState {
+                    index: 1,
+                    focused: false,
+                    window_titles: vec![],
+                }, // Should be filtered
+                WorkspaceMenuState {
+                    index: 2,
+                    focused: true,
+                    window_titles: vec![],
+                }, // Focused, should NOT be filtered
+                WorkspaceMenuState {
+                    index: 3,
+                    focused: false,
+                    window_titles: vec!["Win2".into()],
+                },
             ],
             ..Default::default()
         };
 
-        let world = WorldState { monitors: vec![monitor.clone()] };
-
         let menu = build_menu_for_monitor(
-            &world,
             &monitor,
             &mut workspace_items,
             autostart_id,
@@ -348,28 +437,34 @@ mod tests {
         // Expected items: WS 0, WS 2 (focused), separator, autostart, quit, WS 3.
         // Wait, WS 3 is also there.
         // So: WS 0, WS 2, WS 3.
-        
-        let items = menu.items();
-        let labels: Vec<String> = items.iter().filter_map(|i| {
-            if let Some(m) = i.as_menuitem() {
-                Some(m.text())
-            } else if let Some(c) = i.as_check_menuitem() {
-                Some(c.text())
-            } else {
-                None
-            }
-        }).collect();
 
+        let items = menu.items();
+        let labels: Vec<String> = items
+            .iter()
+            .filter_map(|i| {
+                if let Some(m) = i.as_menuitem() {
+                    Some(m.text())
+                } else if let Some(c) = i.as_check_menuitem() {
+                    Some(c.text())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // The focused-workspace indicator is now the native menu checkmark
+        // (driven by CheckMenuItem's checked state), so labels no longer carry
+        // a glyph prefix.
         // WS 0 (index 0) -> "&1. Win1"
         // WS 1 (index 1) -> filtered
-        // WS 2 (index 2) -> "*&3."
+        // WS 2 (index 2) -> "&3." (focused, natively checked)
         // WS 3 (index 3) -> "&4. Win2"
-        
+
         assert!(labels.contains(&"&1. Win1".to_string()));
         assert!(!labels.iter().any(|l| l.contains("&2.")));
-        assert!(labels.contains(&"*&3.".to_string()));
+        assert!(labels.contains(&"&3.".to_string()));
         assert!(labels.contains(&"&4. Win2".to_string()));
-        
+
         // Check that workspace_items map also only contains what's in the menu
         assert_eq!(workspace_items.len(), 3);
         assert!(workspace_items.values().any(|&(_, ws_idx)| ws_idx == 0));
@@ -379,14 +474,54 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_workspace_menu_id() {
+        // Ids built by `build_menu_for_monitor` round-trip back to stable
+        // monitor ids and workspace indices.
+        assert_eq!(
+            parse_workspace_menu_id("ws-h6d312d61-0"),
+            Some(("m1-a".into(), 0))
+        );
+        assert_eq!(
+            parse_workspace_menu_id("ws-h4445562d31-3"),
+            Some(("DEV-1".into(), 3))
+        );
+        // Older numeric ids are still accepted for compatibility.
+        assert_eq!(parse_workspace_menu_id("ws-12-7"), Some(("12".into(), 7)));
+        // Non-workspace ids are ignored.
+        assert_eq!(parse_workspace_menu_id("autostart"), None);
+        assert_eq!(parse_workspace_menu_id("quit"), None);
+        assert_eq!(parse_workspace_menu_id("ws-1"), None);
+        assert_eq!(parse_workspace_menu_id("ws-a-b"), None);
+    }
+
+    #[test]
+    fn test_encode_monitor_id_round_trips_through_workspace_menu_id() {
+        let encoded = encode_monitor_id("DEV-1");
+        let id = format!("ws-h{encoded}-4");
+        assert_eq!(parse_workspace_menu_id(&id), Some(("DEV-1".into(), 4)));
+    }
+
+    #[test]
     fn test_monitors_ordered_left_to_right_by_x() {
         let mut app = App::new(false, Theme::default(), 64, 96).unwrap();
         // Provided in a non-left-to-right order: x = 1920, 0, 3840.
         app.on_state_changed(WorldState {
             monitors: vec![
-                MonitorState { id: "middle".into(), x: 1920, ..Default::default() },
-                MonitorState { id: "left".into(), x: 0, ..Default::default() },
-                MonitorState { id: "right".into(), x: 3840, ..Default::default() },
+                MonitorState {
+                    id: "middle".into(),
+                    x: 1920,
+                    ..Default::default()
+                },
+                MonitorState {
+                    id: "left".into(),
+                    x: 0,
+                    ..Default::default()
+                },
+                MonitorState {
+                    id: "right".into(),
+                    x: 3840,
+                    ..Default::default()
+                },
             ],
         });
 
@@ -397,9 +532,19 @@ mod tests {
     #[test]
     fn test_state_buffering_and_flush() {
         let mut app = App::new(false, Theme::default(), 64, 96).unwrap();
-        let state1 = WorldState { monitors: vec![MonitorState { id: "m1".into(), ..Default::default() }] };
-        let state2 = WorldState { monitors: vec![MonitorState { id: "m2".into(), ..Default::default() }] };
-        
+        let state1 = WorldState {
+            monitors: vec![MonitorState {
+                id: "m1".into(),
+                ..Default::default()
+            }],
+        };
+        let state2 = WorldState {
+            monitors: vec![MonitorState {
+                id: "m2".into(),
+                ..Default::default()
+            }],
+        };
+
         // Normal update
         app.on_state_changed(state1.clone());
         assert_eq!(app.world, state1);
@@ -418,7 +563,10 @@ mod tests {
 
         // Flush via menu event
         app.clear_menu_lock();
-        assert_eq!(app.world, state2, "Buffered state should be applied after clear_menu_lock");
+        assert_eq!(
+            app.world, state2,
+            "Buffered state should be applied after clear_menu_lock"
+        );
         assert_eq!(app.pending_world, None);
     }
 }

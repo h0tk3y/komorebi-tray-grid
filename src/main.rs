@@ -18,12 +18,12 @@ use tao::{
     event_loop::{ControlFlow, EventLoopBuilder},
 };
 use tray_icon::{menu::MenuEvent, TrayIconEvent};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     keybd_event, RegisterHotKey, HOT_KEY_MODIFIERS, KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL,
     MOD_SHIFT, MOD_WIN, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
-use windows::Win32::Foundation::HWND;
 
 use komorebi_tray_grid::app::App;
 use komorebi_tray_grid::autostart;
@@ -47,15 +47,14 @@ fn run() -> Result<()> {
 
     // Single-instance check: hold a per-user named mutex for our lifetime.
     // A second launch will detect the existing mutex and exit silently.
-    let _instance_guard = match single_instance::acquire()
-        .context("acquire single-instance mutex")?
-    {
-        Acquisition::Acquired(guard) => guard,
-        Acquisition::AlreadyRunning => {
-            tracing::info!("another instance is already running; exiting");
-            return Ok(());
-        }
-    };
+    let _instance_guard =
+        match single_instance::acquire().context("acquire single-instance mutex")? {
+            Acquisition::Acquired(guard) => guard,
+            Acquisition::AlreadyRunning => {
+                tracing::info!("another instance is already running; exiting");
+                return Ok(());
+            }
+        };
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -216,10 +215,7 @@ fn spawn_state_bridge(
         .name("komorebi-state-bridge".into())
         .spawn(move || {
             while let Ok(state) = state_rx.recv() {
-                if proxy
-                    .send_event(UserEvent::StateChanged(state))
-                    .is_err()
-                {
+                if proxy.send_event(UserEvent::StateChanged(state)).is_err() {
                     // The event loop has been dropped — nothing more to do.
                     break;
                 }
@@ -269,7 +265,9 @@ fn init_logging() {
             })
     });
 
-    let registry = tracing_subscriber::registry().with(filter).with(stderr_layer);
+    let registry = tracing_subscriber::registry()
+        .with(filter)
+        .with(stderr_layer);
     let _ = if let Some(layer) = file_layer {
         registry.with(layer).try_init()
     } else {
@@ -282,7 +280,8 @@ fn default_log_path() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("TEMP").map(std::path::PathBuf::from))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    base.join("komorebi-tray-grid").join("komorebi-tray-grid.log")
+    base.join("komorebi-tray-grid")
+        .join("komorebi-tray-grid.log")
 }
 
 /// Spawn a dedicated thread that owns the global hotkey registration and runs
