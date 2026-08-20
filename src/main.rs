@@ -116,6 +116,7 @@ fn run() -> Result<()> {
                     settings.themes.for_scheme(scheme),
                     settings.max_title_length,
                     settings.max_combined_title_length,
+                    settings.workspace_submenus,
                 ) {
                     Ok(a) => app = Some(a),
                     Err(e) => {

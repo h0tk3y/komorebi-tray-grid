@@ -25,6 +25,8 @@ struct MenuConfig {
     pub max_title_length: usize,
     #[serde(default = "default_max_combined_title_length")]
     pub max_combined_title_length: usize,
+    #[serde(default = "default_workspace_submenus")]
+    pub workspace_submenus: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -109,6 +111,7 @@ pub struct AppSettings {
     pub show_hotkey: Option<String>,
     pub max_title_length: usize,
     pub max_combined_title_length: usize,
+    pub workspace_submenus: bool,
 }
 
 impl Default for AppSettings {
@@ -118,6 +121,7 @@ impl Default for AppSettings {
             show_hotkey: None,
             max_title_length: default_max_title_length(),
             max_combined_title_length: default_max_combined_title_length(),
+            workspace_submenus: default_workspace_submenus(),
         }
     }
 }
@@ -156,6 +160,7 @@ fn try_load_settings() -> Result<AppSettings> {
         show_hotkey: config.menu.show_hotkey,
         max_title_length: config.menu.max_title_length,
         max_combined_title_length: config.menu.max_combined_title_length,
+        workspace_submenus: config.menu.workspace_submenus,
     })
 }
 
@@ -286,6 +291,10 @@ fn default_max_title_length() -> usize {
 
 fn default_max_combined_title_length() -> usize {
     96
+}
+
+fn default_workspace_submenus() -> bool {
+    true
 }
 
 #[cfg(test)]

@@ -83,6 +83,8 @@ pub struct Monitor {
 #[serde(default)]
 pub struct Window {
     pub title: String,
+    pub exe: String,
+    pub hwnd: usize,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]

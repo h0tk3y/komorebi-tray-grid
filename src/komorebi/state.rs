@@ -34,7 +34,14 @@ pub struct MonitorState {
 pub struct WorkspaceMenuState {
     pub index: usize,
     pub focused: bool,
-    pub window_titles: Vec<String>,
+    pub windows: Vec<WindowMenuState>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WindowMenuState {
+    pub title: String,
+    pub exe: String,
+    pub hwnd: usize,
 }
 
 /// Snapshot of every monitor known to komorebi, in komorebi's reported order.
@@ -99,7 +106,7 @@ fn project_monitor(index: usize, monitor: &types::Monitor, active: bool) -> Moni
             .map(|(wi, ws)| WorkspaceMenuState {
                 index: wi,
                 focused: wi == focused_workspace,
-                window_titles: workspace_titles(ws),
+                windows: workspace_windows(ws),
             })
             .collect(),
     }
@@ -120,27 +127,63 @@ fn project_workspace(index: usize, focused_workspace: usize, ws: &types::Workspa
     }
 }
 
-fn workspace_titles(ws: &types::Workspace) -> Vec<String> {
-    let mut titles = Vec::new();
+fn workspace_windows(ws: &types::Workspace) -> Vec<WindowMenuState> {
+    let mut windows = Vec::new();
 
     for container in &ws.containers.elements {
-        titles.extend(types::container_titles(container));
-    }
-
-    titles.extend(ws.floating_windows.titles());
-
-    if let Some(container) = &ws.monocle_container {
-        titles.extend(types::container_titles(container));
-    }
-
-    if let Some(window) = &ws.maximized_window {
-        let title = window.title.trim();
-        if !title.is_empty() {
-            titles.push(title.to_string());
+        for window in &container.windows.elements {
+            if let Some(w) = project_window(window) {
+                windows.push(w);
+            }
         }
     }
 
-    titles
+    match &ws.floating_windows {
+        types::WindowCollection::Ring(ring) => {
+            for window in &ring.elements {
+                if let Some(w) = project_window(window) {
+                    windows.push(w);
+                }
+            }
+        }
+        types::WindowCollection::Array(arr) => {
+            for window in arr {
+                if let Some(w) = project_window(window) {
+                    windows.push(w);
+                }
+            }
+        }
+        types::WindowCollection::Other(_) => {}
+    }
+
+    if let Some(container) = &ws.monocle_container {
+        for window in &container.windows.elements {
+            if let Some(w) = project_window(window) {
+                windows.push(w);
+            }
+        }
+    }
+
+    if let Some(window) = &ws.maximized_window {
+        if let Some(w) = project_window(window) {
+            windows.push(w);
+        }
+    }
+
+    windows
+}
+
+fn project_window(window: &types::Window) -> Option<WindowMenuState> {
+    let title = window.title.trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(WindowMenuState {
+            title: title.to_string(),
+            exe: window.exe.clone(),
+            hwnd: window.hwnd,
+        })
+    }
 }
 
 fn monitor_id(index: usize, monitor: &types::Monitor) -> String {

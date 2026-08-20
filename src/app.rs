@@ -6,11 +6,14 @@
 //! the `tao` event loop in `main.rs`.
 
 use std::collections::HashMap;
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP, VK_DOWN};
+use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
 use anyhow::Result;
 use komorebi_client::SocketMessage;
 use tao::event_loop::ControlFlow;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 
 use crate::komorebi::client::send_command;
 use crate::komorebi::state::{MonitorState, WorldState};
@@ -27,8 +30,13 @@ pub struct App {
     initial_autostart: bool,
     max_title_length: usize,
     max_combined_title_length: usize,
+    workspace_submenus: bool,
     /// Maps menu item ID to (stable_monitor_id, workspace_index)
     workspace_items: HashMap<MenuId, (String, usize)>,
+    /// Maps menu item ID to (stable_monitor_id, workspace_index, hwnd)
+    window_items: HashMap<MenuId, (String, usize, usize)>,
+    /// Maps monitor ID -> (Workspace index -> Window Menu)
+    virtual_submenus: HashMap<String, HashMap<usize, Menu>>,
     /// Instant when the menu was last opened, used to defer updates
     /// that might dismiss the menu.
     menu_opened_at: Option<std::time::Instant>,
@@ -43,6 +51,7 @@ impl App {
         theme: Theme,
         max_title_length: usize,
         max_combined_title_length: usize,
+        workspace_submenus: bool,
     ) -> Result<Self> {
         Ok(Self {
             world: WorldState::default(),
@@ -52,7 +61,10 @@ impl App {
             initial_autostart,
             max_title_length,
             max_combined_title_length,
+            workspace_submenus,
             workspace_items: HashMap::new(),
+            window_items: HashMap::new(),
+            virtual_submenus: HashMap::new(),
             menu_opened_at: None,
             pending_world: None,
         })
@@ -86,24 +98,35 @@ impl App {
 
     pub fn on_theme_changed(&mut self, theme: Theme) {
         self.workspace_items.clear();
+        self.window_items.clear();
+        self.virtual_submenus.clear();
         let mut workspace_items = HashMap::new();
+        let mut window_items = HashMap::new();
+        let mut virtual_submenus = HashMap::new();
         let max_title_length = self.max_title_length;
         let max_combined_title_length = self.max_combined_title_length;
+        let workspace_submenus = self.workspace_submenus;
         let world = self.world.clone();
         if let Err(e) = self.tray.set_theme(theme, &world, |m| {
-            build_menu_for_monitor(
+            let (menu, submenus) = build_menu_for_monitor(
                 m,
                 &mut workspace_items,
+                &mut window_items,
                 self.autostart_item_id.clone(),
                 self.quit_item_id.clone(),
                 self.initial_autostart,
                 max_title_length,
                 max_combined_title_length,
-            )
+                workspace_submenus,
+            );
+            virtual_submenus.insert(m.id.clone(), submenus);
+            menu
         }) {
             tracing::error!(error = %e, "failed to apply updated theme");
         } else {
             self.workspace_items = workspace_items;
+            self.window_items = window_items;
+            self.virtual_submenus = virtual_submenus;
             tracing::debug!("applied updated theme");
         }
     }
@@ -116,10 +139,9 @@ impl App {
     /// menu closes and therefore gives us a precise "menu dismissed" signal.
     /// Open on a left- or right-button release, mirroring the previous default.
     pub fn on_tray_event(&mut self, event: tray_icon::TrayIconEvent) {
-        use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
+        use tray_icon::{MouseButtonState, TrayIconEvent};
         if let TrayIconEvent::Click {
             id,
-            button: MouseButton::Left | MouseButton::Right,
             button_state: MouseButtonState::Up,
             ..
         } = event
@@ -131,24 +153,36 @@ impl App {
     }
 
     fn reconcile_tray(&mut self) {
+        self.workspace_items.clear();
+        self.window_items.clear();
+        self.virtual_submenus.clear();
         let mut workspace_items = HashMap::new();
+        let mut window_items = HashMap::new();
+        let mut virtual_submenus = HashMap::new();
         let max_title_length = self.max_title_length;
         let max_combined_title_length = self.max_combined_title_length;
+        let workspace_submenus = self.workspace_submenus;
         let world = self.world.clone();
         if let Err(e) = self.tray.reconcile(&world, |m| {
-            build_menu_for_monitor(
+            let (menu, submenus) = build_menu_for_monitor(
                 m,
                 &mut workspace_items,
+                &mut window_items,
                 self.autostart_item_id.clone(),
                 self.quit_item_id.clone(),
                 self.initial_autostart,
                 max_title_length,
                 max_combined_title_length,
-            )
+                workspace_submenus,
+            );
+            virtual_submenus.insert(m.id.clone(), submenus);
+            menu
         }) {
             tracing::error!(error = %e, "tray reconcile failed");
         } else {
             self.workspace_items = workspace_items;
+            self.window_items = window_items;
+            self.virtual_submenus = virtual_submenus;
             tracing::debug!(
                 monitors = self.world.monitors.len(),
                 icons = self.tray.len(),
@@ -186,6 +220,28 @@ fn parse_workspace_menu_id(id: &str) -> Option<(String, usize)> {
     Some((monitor.to_string(), workspace.parse().ok()?))
 }
 
+fn parse_window_menu_id(id: &str) -> Option<(String, usize, usize)> {
+    let rest = id.strip_prefix("win-")?;
+    let mut parts = rest.splitn(3, '-');
+    let monitor = parts.next()?;
+    let workspace = parts.next()?;
+    let window = parts.next()?;
+
+    if let Some(encoded) = monitor.strip_prefix('h') {
+        return Some((
+            decode_hex(encoded)?,
+            workspace.parse().ok()?,
+            window.parse().ok()?,
+        ));
+    }
+
+    Some((
+        monitor.to_string(),
+        workspace.parse().ok()?,
+        window.parse().ok()?,
+    ))
+}
+
 fn encode_monitor_id(monitor_id: &str) -> String {
     let mut out = String::with_capacity(monitor_id.len() * 2);
     for byte in monitor_id.as_bytes() {
@@ -214,30 +270,33 @@ fn decode_hex(input: &str) -> Option<String> {
 fn build_menu_for_monitor(
     monitor: &MonitorState,
     workspace_items: &mut HashMap<MenuId, (String, usize)>,
+    window_items: &mut HashMap<MenuId, (String, usize, usize)>,
     autostart_item_id: MenuId,
     quit_item_id: MenuId,
     initial_autostart: bool,
     max_title_length: usize,
     max_combined_title_length: usize,
-) -> Menu {
+    workspace_submenus: bool,
+) -> (Menu, HashMap<usize, Menu>) {
     let menu = Menu::new();
+    let mut virtual_submenus = HashMap::new();
 
-    // Workspaces
+    // 1. Workspace Menu
     for ws in &monitor.menu_workspaces {
-        if !ws.focused && ws.window_titles.is_empty() {
+        if !ws.focused && ws.windows.is_empty() {
             continue;
         }
 
         let digit = ws.index + 1;
         let base_label = format!("&{}.", digit);
 
-        let label = if ws.window_titles.is_empty() {
+        let label = if ws.windows.is_empty() {
             base_label
         } else {
             let titles_joined = ws
-                .window_titles
+                .windows
                 .iter()
-                .map(|t| ellipsize(t, max_title_length))
+                .map(|w| ellipsize(&w.title, max_title_length))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
@@ -247,9 +306,7 @@ fn build_menu_for_monitor(
             )
         };
 
-        // Use the native Windows menu-item marker (a checkmark) to indicate the
-        // focused workspace, rather than drawing our own Unicode glyph.
-        let item = CheckMenuItem::with_id(
+        let ws_item = CheckMenuItem::with_id(
             MenuId::new(format!(
                 "ws-h{}-{}",
                 encode_monitor_id(&monitor.id),
@@ -260,11 +317,59 @@ fn build_menu_for_monitor(
             ws.focused,
             None,
         );
-        workspace_items.insert(item.id().clone(), (monitor.id.clone(), ws.index));
-        let _ = menu.append(&item);
+        workspace_items.insert(ws_item.id().clone(), (monitor.id.clone(), ws.index));
+        menu.append(&ws_item).unwrap();
+
+        // 2. Virtual Submenu (Window Menu for this workspace)
+        if workspace_submenus {
+            let win_menu = Menu::new();
+            let focus_ws_item = MenuItem::with_id(
+                MenuId::new(format!(
+                    "focus-ws-h{}-{}",
+                    encode_monitor_id(&monitor.id),
+                    ws.index
+                )),
+                "Focus Workspace",
+                true,
+                None,
+            );
+            // We reuse the same logic for "Focus Workspace" item by putting it in workspace_items
+            workspace_items.insert(focus_ws_item.id().clone(), (monitor.id.clone(), ws.index));
+            win_menu.append(&focus_ws_item).unwrap();
+            win_menu.append(&PredefinedMenuItem::separator()).unwrap();
+
+            for (win_idx, win) in ws.windows.iter().enumerate() {
+                let win_digit = win_idx + 1;
+                let win_mnemonic = if win_digit <= 9 {
+                    format!("&{}. ", win_digit)
+                } else {
+                    String::new()
+                };
+
+                let win_label = format!("{}{}", win_mnemonic, ellipsize(&win.title, max_title_length));
+
+                let win_item = MenuItem::with_id(
+                    MenuId::new(format!(
+                        "win-h{}-{}-{}",
+                        encode_monitor_id(&monitor.id),
+                        ws.index,
+                        win_idx
+                    )),
+                    win_label,
+                    true,
+                    None,
+                );
+                window_items.insert(
+                    win_item.id().clone(),
+                    (monitor.id.clone(), ws.index, win.hwnd),
+                );
+                win_menu.append(&win_item).unwrap();
+            }
+            virtual_submenus.insert(ws.index, win_menu);
+        }
     }
 
-    let _ = menu.append(&PredefinedMenuItem::separator());
+    menu.append(&PredefinedMenuItem::separator()).unwrap();
 
     let autostart_item = CheckMenuItem::with_id(
         autostart_item_id,
@@ -273,12 +378,12 @@ fn build_menu_for_monitor(
         initial_autostart,
         None,
     );
-    let _ = menu.append(&autostart_item);
+    menu.append(&autostart_item).unwrap();
 
     let quit_item = MenuItem::with_id(quit_item_id, "&Quit", true, None);
-    let _ = menu.append(&quit_item);
+    menu.append(&quit_item).unwrap();
 
-    menu
+    (menu, virtual_submenus)
 }
 
 impl App {
@@ -311,16 +416,94 @@ impl App {
             return;
         }
 
-        // Resolve the clicked workspace. Prefer the map populated when the menu
-        // was built, but fall back to parsing the deterministic id: reconciling
-        // the tray on close rebuilds `workspace_items`, and if the buffered
-        // state no longer renders that workspace (e.g. it became empty) the map
-        // entry disappears even though the user did click it.
-        if let Some((monitor_id, ws_idx)) = self
-            .workspace_items
+        // 1. Check if it's a main workspace item (triggers virtual submenu)
+        if event.id.as_ref().starts_with("ws-") {
+            if let Some((monitor_id, ws_idx)) = self
+                .workspace_items
+                .get(&event.id)
+                .cloned()
+                .or_else(|| parse_workspace_menu_id(event.id.as_ref()))
+            {
+                if let Some(submenus) = self.virtual_submenus.get(&monitor_id) {
+                    if let Some(win_menu) = submenus.get(&ws_idx) {
+                        tracing::debug!(monitor = %monitor_id, workspace = ws_idx, "showing virtual submenu");
+                        // We must set the lock BEFORE showing the menu
+                        self.menu_opened_at = Some(std::time::Instant::now());
+                        crate::tray::MENU_VISIBLE.store(true, std::sync::atomic::Ordering::SeqCst);
+
+                        // Spawn a thread to select the first item ("Focus Workspace")
+                        // so it can be triggered by pressing Enter immediately.
+                        std::thread::spawn(|| {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            unsafe {
+                                keybd_event(VK_DOWN.0 as u8, 0, Default::default(), 0);
+                                keybd_event(VK_DOWN.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+                            }
+                        });
+
+                        let _ = self.tray.show_custom_menu(&monitor_id, win_menu);
+                        self.clear_menu_lock();
+                        return;
+                    }
+                }
+
+                // Fallback: switch to the workspace (if submenus are disabled or not available)
+                if let Some(monitor_index) = self.world.monitors.iter().position(|m| m.id == monitor_id)
+                {
+                    tracing::info!(
+                        monitor = %monitor_id,
+                        monitor_index,
+                        workspace = ws_idx,
+                        "switching workspace"
+                    );
+                    let msg = SocketMessage::FocusMonitorWorkspaceNumber(monitor_index, ws_idx);
+                    if let Err(e) = send_command(msg) {
+                        tracing::error!(error = %e, "failed to send focus command");
+                    }
+                }
+                return;
+            }
+        }
+
+        // 2. Check if it's a focus workspace item (from virtual submenu)
+        if event.id.as_ref().starts_with("focus-ws-") {
+            let id_str = event.id.as_ref();
+            let rest = &id_str["focus-".len()..]; // strip "focus-" to get "ws-..."
+            if let Some((monitor_id, ws_idx)) = parse_workspace_menu_id(rest) {
+                if let Some(monitor_index) = self.world.monitors.iter().position(|m| m.id == monitor_id)
+                {
+                    tracing::info!(
+                        monitor = %monitor_id,
+                        monitor_index,
+                        workspace = ws_idx,
+                        "switching workspace via virtual submenu"
+                    );
+                    let msg = SocketMessage::FocusMonitorWorkspaceNumber(monitor_index, ws_idx);
+                    if let Err(e) = send_command(msg) {
+                        tracing::error!(error = %e, "failed to send focus command");
+                    }
+                }
+                return;
+            }
+        }
+
+        // 3. Check if it's a window item
+        if let Some((monitor_id, ws_idx, win_hwnd)) = self
+            .window_items
             .get(&event.id)
             .cloned()
-            .or_else(|| parse_workspace_menu_id(event.id.as_ref()))
+            .or_else(|| {
+                let (mid, wid, widx) = parse_window_menu_id(event.id.as_ref())?;
+                let hwnd = self
+                    .world
+                    .monitor(&mid)?
+                    .menu_workspaces
+                    .get(wid)?
+                    .windows
+                    .get(widx)?
+                    .hwnd;
+                Some((mid, wid, hwnd))
+            })
         {
             if let Some(monitor_index) = self.world.monitors.iter().position(|m| m.id == monitor_id)
             {
@@ -328,19 +511,20 @@ impl App {
                     monitor = %monitor_id,
                     monitor_index,
                     workspace = ws_idx,
-                    "switching workspace via menu"
+                    hwnd = %win_hwnd,
+                    "focusing window via menu"
                 );
-                let msg = SocketMessage::FocusMonitorWorkspaceNumber(monitor_index, ws_idx);
-                if let Err(e) = send_command(msg) {
-                    tracing::error!(error = %e, "failed to send focus command");
+                // First switch to the monitor and workspace
+                let ws_msg = SocketMessage::FocusMonitorWorkspaceNumber(monitor_index, ws_idx);
+                let _ = send_command(ws_msg);
+
+                // Then focus the specific window by HWND. Komorebi will see this
+                // via its FocusChange event handler and update its state.
+                unsafe {
+                    let _ = SetForegroundWindow(HWND(win_hwnd as _));
                 }
-            } else {
-                tracing::warn!(
-                    monitor = %monitor_id,
-                    workspace = ws_idx,
-                    "clicked workspace menu item but the monitor no longer exists"
-                );
             }
+            return;
         }
     }
 
@@ -352,20 +536,15 @@ impl App {
     }
 
     /// Open the context menu for the monitor with the given id.
-    ///
-    /// On Windows `TrayManager::show_menu` blocks inside `TrackPopupMenu` until
-    /// the popup is dismissed. We pause reconciliation for the duration (so a
-    /// re-entrant state update can't rebuild the icons and dismiss the menu),
-    /// then flush any buffered state the instant it closes — no timeout needed.
-    fn show_menu_for_monitor(&mut self, monitor_id: &str) {
+    pub fn show_menu_for_monitor(&mut self, monitor_id: &str) {
         self.menu_opened_at = Some(std::time::Instant::now());
         crate::tray::MENU_VISIBLE.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Err(e) = self.tray.show_menu(monitor_id) {
-            tracing::error!(error = %e, monitor_id = %monitor_id, "failed to show tray menu");
+            tracing::error!(error = %e, monitor_id = %monitor_id, "failed to show menu");
         }
-        // Control returns here only once the popup has closed.
         self.clear_menu_lock();
     }
+
 
     pub fn monitor_count(&self) -> usize {
         self.world.monitors.len()
@@ -388,12 +567,13 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::komorebi::state::{MonitorState, WorkspaceMenuState, WorldState};
+    use crate::komorebi::state::{MonitorState, WindowMenuState, WorkspaceMenuState, WorldState};
     use crate::render::Theme;
 
     #[test]
     fn test_empty_workspaces_filtered_except_focused() {
         let mut workspace_items = HashMap::new();
+        let mut window_items = HashMap::new();
         let autostart_id = MenuId::new("autostart");
         let quit_id = MenuId::new("quit");
 
@@ -403,43 +583,48 @@ mod tests {
                 WorkspaceMenuState {
                     index: 0,
                     focused: false,
-                    window_titles: vec!["Win1".into()],
+                    windows: vec![WindowMenuState {
+                        title: "Win1".into(),
+                        ..Default::default()
+                    }],
                 },
                 WorkspaceMenuState {
                     index: 1,
                     focused: false,
-                    window_titles: vec![],
+                    windows: vec![],
                 }, // Should be filtered
                 WorkspaceMenuState {
                     index: 2,
                     focused: true,
-                    window_titles: vec![],
+                    windows: vec![],
                 }, // Focused, should NOT be filtered
                 WorkspaceMenuState {
                     index: 3,
                     focused: false,
-                    window_titles: vec!["Win2".into()],
+                    windows: vec![WindowMenuState {
+                        title: "Win2".into(),
+                        ..Default::default()
+                    }],
                 },
             ],
             ..Default::default()
         };
 
-        let menu = build_menu_for_monitor(
+        let (ws_menu, virtual_submenus) = build_menu_for_monitor(
             &monitor,
             &mut workspace_items,
+            &mut window_items,
             autostart_id,
             quit_id,
             false,
             64,
             96,
+            true,
         );
 
-        // Expected items: WS 0, WS 2 (focused), separator, autostart, quit, WS 3.
-        // Wait, WS 3 is also there.
-        // So: WS 0, WS 2, WS 3.
-
-        let items = menu.items();
-        let labels: Vec<String> = items
+        // Expected items in ws_menu: WS 0, WS 2 (focused), WS 3, separator, autostart, quit.
+        let ws_items = ws_menu.items();
+        let ws_labels: Vec<String> = ws_items
             .iter()
             .filter_map(|i| {
                 if let Some(m) = i.as_menuitem() {
@@ -452,25 +637,23 @@ mod tests {
             })
             .collect();
 
-        // The focused-workspace indicator is now the native menu checkmark
-        // (driven by CheckMenuItem's checked state), so labels no longer carry
-        // a glyph prefix.
-        // WS 0 (index 0) -> "&1. Win1"
-        // WS 1 (index 1) -> filtered
-        // WS 2 (index 2) -> "&3." (focused, natively checked)
-        // WS 3 (index 3) -> "&4. Win2"
+        assert!(ws_labels.iter().any(|l| l.contains("&1. Win1")));
+        assert!(!ws_labels.iter().any(|l| l.contains("&2.")));
+        assert!(ws_labels.contains(&"&3.".to_string()));
+        assert!(ws_labels.iter().any(|l| l.contains("&4. Win2")));
 
-        assert!(labels.contains(&"&1. Win1".to_string()));
-        assert!(!labels.iter().any(|l| l.contains("&2.")));
-        assert!(labels.contains(&"&3.".to_string()));
-        assert!(labels.contains(&"&4. Win2".to_string()));
+        // Expected submenus: 0, 2, 3.
+        assert_eq!(virtual_submenus.len(), 3);
+        let win_menu_0 = virtual_submenus.get(&0).unwrap();
+        let win_labels_0: Vec<String> = win_menu_0.items()
+            .iter()
+            .filter_map(|i| i.as_menuitem().map(|m| m.text()))
+            .collect();
+        assert!(win_labels_0.contains(&"&1. Win1".to_string()));
 
         // Check that workspace_items map also only contains what's in the menu
-        assert_eq!(workspace_items.len(), 3);
-        assert!(workspace_items.values().any(|&(_, ws_idx)| ws_idx == 0));
-        assert!(workspace_items.values().any(|&(_, ws_idx)| ws_idx == 2));
-        assert!(workspace_items.values().any(|&(_, ws_idx)| ws_idx == 3));
-        assert!(!workspace_items.values().any(|&(_, ws_idx)| ws_idx == 1));
+        // 3 workspaces * (main item + focus item) = 6 entries.
+        assert_eq!(workspace_items.len(), 6);
     }
 
     #[test]
@@ -503,7 +686,7 @@ mod tests {
 
     #[test]
     fn test_monitors_ordered_left_to_right_by_x() {
-        let mut app = App::new(false, Theme::default(), 64, 96).unwrap();
+        let mut app = App::new(false, Theme::default(), 64, 96, true).unwrap();
         // Provided in a non-left-to-right order: x = 1920, 0, 3840.
         app.on_state_changed(WorldState {
             monitors: vec![
@@ -531,7 +714,7 @@ mod tests {
 
     #[test]
     fn test_state_buffering_and_flush() {
-        let mut app = App::new(false, Theme::default(), 64, 96).unwrap();
+        let mut app = App::new(false, Theme::default(), 64, 96, true).unwrap();
         let state1 = WorldState {
             monitors: vec![MonitorState {
                 id: "m1".into(),
@@ -568,5 +751,46 @@ mod tests {
             "Buffered state should be applied after clear_menu_lock"
         );
         assert_eq!(app.pending_world, None);
+    }
+
+    #[test]
+    fn test_workspace_submenus_disabled() {
+        use crate::komorebi::state::WindowMenuState;
+        let mut workspace_items = HashMap::new();
+        let mut window_items = HashMap::new();
+        let autostart_id = MenuId::new("auto");
+        let quit_id = MenuId::new("quit");
+
+        let monitor = MonitorState {
+            id: "m1".into(),
+            menu_workspaces: vec![WorkspaceMenuState {
+                index: 0,
+                focused: false,
+                windows: vec![WindowMenuState {
+                    title: "Win1".into(),
+                    ..Default::default()
+                }],
+            }],
+            ..Default::default()
+        };
+
+        // When disabled
+        let (_ws_menu, virtual_submenus) = build_menu_for_monitor(
+            &monitor,
+            &mut workspace_items,
+            &mut window_items,
+            autostart_id,
+            quit_id,
+            false,
+            64,
+            96,
+            false,
+        );
+
+        assert_eq!(virtual_submenus.len(), 0, "No virtual submenus should be built");
+        
+        // The workspace item should still be in workspace_items for fallback focus
+        let ws_item_id = MenuId::new(format!("ws-h{}-0", encode_monitor_id("m1")));
+        assert!(workspace_items.contains_key(&ws_item_id));
     }
 }

@@ -73,6 +73,7 @@ The repository contains only `spec.md` and an empty `.junie/` workspace folder �
 - **Komorebi integration**: use the documented pipe subscription. Read newline-delimited JSON via `tokio`'s `NamedPipeServer` running on a dedicated tokio current-thread runtime in a worker thread; forward parsed state to the UI thread via a `tao` user-event channel (`EventLoopProxy::send_event`).
 - **State-update strategy**: rather than attempting to model every komorebi event variant, the worker re-queries `komorebic state` whenever an event arrives (or, if the event payload already carries the full state — komorebi includes it in newer versions — use it directly). This is robust to komorebi schema evolution and matches the spec's hint that `komorebic state` is the canonical source. Updates are debounced (~50 ms) to coalesce bursts.
 - **Autostart**: per-user registry write under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\komorebi-tray-grid`, using the `windows-registry` (or `winreg`) crate. Avoids needing admin rights or the Startup folder. The menu reads the current value to display the correct checked state.
+- **Tray Menu Hierarchy**: Workspaces are represented in a two-tier menu system using "virtual submenus" by default. This behavior is configurable via `workspace_submenus` in `config.json`. Clicking a workspace in the main Workspace Menu opens a separate Window Menu for that workspace. These menus use keyboard mnemonics (digits 1-9) for quick navigation. The "Focus Workspace" item in the Window Menu is automatically highlighted to allow immediate switching via the Enter key. Window items use the system HWND for reliable focusing in multi-window applications.
 - **Single-instance**: named mutex via `CreateMutexW` (`Global\komorebi-tray-grid`); if already held, the second instance exits silently.
 - **Distribution**: GitHub Actions workflow (`windows-latest`) producing a zipped portable `komorebi-tray-grid.exe` from `cargo build --release`. Optional MSI via `cargo-wix` is a stretch goal but not v1.
 
@@ -254,3 +255,19 @@ Only one instance can run, and autostart can be toggled from any tray icon's men
 - Create `src/autostart.rs` with `is_enabled() -> bool`, `enable() -> Result<()>`, `disable() -> Result<()>` against `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\komorebi-tray-grid`, storing the current `std::env::current_exe()` path quoted.
 - On startup and whenever the menu is about to be shown, refresh the `Enable autostart` checkbox from `autostart::is_enabled()`.
 - Wire the menu item handler in `app.rs` to toggle and update the checkmark; wire `Quit` to break out of the event loop and drop tray icons cleanly.
+
+### ✓ Step 6: Implement Virtual Submenus and Window-level Focusing
+Workspace items in the tray menu trigger a secondary "virtual" menu listing individual windows.
+
+- Implement "Virtual Submenus" logic in `app.rs`: intercepted workspace clicks trigger a new `Menu` specifically for that workspace.
+- Include a "Focus Workspace" item at the top of each Window Menu, automatically focused via a keyboard injection trick (`VK_DOWN`) to support immediate `Enter` key switching.
+- Implement window focusing using `SetForegroundWindow` with HWNDs retrieved from `komorebi` state.
+- Update `spec.md` and `README.md` to document the new two-tier menu interaction and keyboard navigation.
+
+### ✓ Step 7: Introduce `workspace_submenus` configuration
+Allow users to toggle the virtual submenu behavior via a configuration key.
+
+- Add `workspace_submenus` (default `true`) to `MenuConfig` and `AppSettings` in `config.rs`.
+- Update `App::new` and `build_menu_for_monitor` to respect the `workspace_submenus` flag.
+- Update `on_menu_event` to provide a fallback focus-switching behavior when submenus are disabled.
+- Update `spec.md` and `README.md` to document the new configuration key.

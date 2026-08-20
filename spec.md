@@ -21,8 +21,35 @@ When there is more than one monitor, the app should show one tray icon per monit
 The app has an autostart feature that can be enabled or disabled in the 
 right-click menu on the tray icon. Each tray icon should show the same right-click menu.
 
+### Tray Icon Context Menu
+
+The tray icon provides a way to interact with workspaces and windows using a two-tier menu system:
+* **Tray Interaction**: Clicking the tray icon opens the **Workspace Menu**.
+* **Workspace Menu**:
+  * Lists all non-empty (or focused) workspaces.
+  * Labels include a summary of window titles (e.g., `&1. Title A, Title B`), ellipsized to fit.
+  * The currently focused workspace is marked with a native checkmark.
+  * Each workspace has a keyboard mnemonic (digits `&1.` through `&9.`).
+  * Clicking a workspace item opens the **Window Menu** for that specific workspace.
+* **Window Menu**:
+  * **Focus Workspace**: An item at the top to switch to the workspace immediately. It is automatically highlighted when the menu opens so it can be triggered by pressing Enter.
+  * (Separator)
+  * **Window Items**: A list of windows in that workspace. Selecting a window item switches to the workspace and focuses that specific window (using its system HWND).
+  * Each window item has a keyboard mnemonic (digits `&1.` through `&9.`).
+* **Hotkey Support**: The global hotkey cycle shows the **Workspace Menu** for the target monitor.
+* **Autostart**: An "Enable autostart" toggle.
+* **Quit**: Terminates the application.
+
 The app supports per-user color customization through a JSON config file at
 `%APPDATA%\komorebi-tray-grid\config.json`.
+
+### Menu Configuration
+
+The app supports several menu-related settings in `config.json` under the `menu` key:
+- `workspace_submenus` (bool, default `true`): If enabled, clicking a workspace item opens a Window Menu (virtual submenu). If disabled, it focuses the workspace directly.
+- `show_hotkey` (optional string): A global keyboard shortcut to open the menu.
+- `max_title_length` (int, default `64`): Maximum length for individual window titles in summaries.
+- `max_combined_title_length` (int, default `96`): Maximum length for the joined window summary in workspace labels.
 
 ### komorebi integration
 

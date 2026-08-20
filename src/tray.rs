@@ -25,6 +25,8 @@ pub struct TrayManager {
     /// Map from `MonitorState::id` → live `TrayIcon` handle. The order
     /// doesn't matter; we look up by id on every reconcile.
     icons: HashMap<String, TrayIcon>,
+    /// Map from `MonitorState::id` → primary Workspace Menu.
+    menus: HashMap<String, Menu>,
     theme: Theme,
 }
 
@@ -33,12 +35,13 @@ impl TrayManager {
     pub fn new(theme: Theme) -> Self {
         Self {
             icons: HashMap::new(),
+            menus: HashMap::new(),
             theme,
         }
     }
 
     /// Reconcile the live tray icons against `world`.
-    /// `get_menu` is a callback that provides a menu for a given monitor.
+    /// `get_menu` is a callback that provides the menu for a given monitor.
     pub fn reconcile(
         &mut self,
         world: &WorldState,
@@ -58,6 +61,7 @@ impl TrayManager {
 
         // Drop icons for monitors that have disappeared.
         self.icons.retain(|id, _| seen.contains(id));
+        self.menus.retain(|id, _| seen.contains(id));
 
         Ok(())
     }
@@ -91,7 +95,8 @@ impl TrayManager {
             existing
                 .set_tooltip(Some(tooltip))
                 .context("set tray icon tooltip")?;
-            existing.set_menu(Some(Box::new(menu)));
+            existing.set_menu(Some(Box::new(menu.clone())));
+            self.menus.insert(monitor.id.clone(), menu);
             return Ok(());
         }
 
@@ -105,12 +110,13 @@ impl TrayManager {
             // timeout to detect the close.
             .with_menu_on_left_click(false)
             .with_menu_on_right_click(false)
-            .with_menu(Box::new(menu))
+            .with_menu(Box::new(menu.clone()))
             .with_tooltip(tooltip)
             .with_icon(icon)
             .build()
             .context("create tray icon")?;
         self.icons.insert(monitor.id.clone(), tray);
+        self.menus.insert(monitor.id.clone(), menu);
         Ok(())
     }
 
@@ -130,24 +136,26 @@ impl TrayManager {
         self.icons.is_empty()
     }
 
-    /// Show the context menu for the given monitor ID.
-    ///
-    /// On Windows this blocks inside `TrackPopupMenu` until the menu is
-    /// dismissed, so the caller can treat the return as a precise
-    /// "menu closed" signal.
+    /// Show the primary context menu for the given monitor ID.
     pub fn show_menu(&self, monitor_id: &str) -> Result<()> {
+        if let Some(menu) = self.menus.get(monitor_id) {
+            self.show_menu_internal(monitor_id, menu)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Show a specific menu (e.g. a virtual submenu) for the given monitor ID.
+    pub fn show_custom_menu(&self, monitor_id: &str, menu: &Menu) -> Result<()> {
+        self.show_menu_internal(monitor_id, menu)
+    }
+
+    fn show_menu_internal(&self, monitor_id: &str, menu: &Menu) -> Result<()> {
         if let Some(tray) = self.icons.get_now(monitor_id) {
+            // Temporarily attach the requested menu.
+            tray.set_menu(Some(Box::new(menu.clone())));
             tray.show_menu();
-            // `tray-icon` invokes `TrackPopupMenu` *without* `TPM_RETURNCMD`, so
-            // a menu selection is delivered as a `WM_COMMAND` that is merely
-            // *posted* to the tray window's queue and dispatched later by the
-            // event loop. Our caller reconciles the tray immediately after this
-            // returns, and reconciling replaces (and destroys) the menu that was
-            // just shown. If the `WM_COMMAND` is still sitting in the queue at
-            // that point, `muda` can no longer resolve the clicked item and the
-            // `MenuEvent` is silently dropped — so the workspace switch does
-            // nothing. Drain those pending menu messages now, while the menu is
-            // still alive, so the selection is always delivered.
+            // See comments in `show_menu` for why we drain here.
             unsafe { drain_pending_menu_messages() };
         }
         Ok(())

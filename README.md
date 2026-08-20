@@ -27,14 +27,18 @@ See [`spec.md`](spec.md) for the original spec and [`plan.md`](plan.md) for the 
 .\target\release\komorebi-tray-grid.exe
 ```
 
-### Tray Menu
+### Tray Interaction
 
-Right-clicking any tray icon (or using the global hotkey) opens a menu where you can:
+Interacting with any tray icon allows you to:
 
-- **Switch workspaces**: Click a workspace item to focus it. The menu lists window titles for each workspace; the currently focused workspace is marked with a checkmark.
-- **Enable autostart** — Toggle a per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
-  entry so the app launches on logon.
-- **Quit** — Terminate the app and remove all tray icons.
+- **Switch workspaces**: Click the tray icon to open a menu listing all non-empty workspaces. Each workspace label includes a summary of its windows (e.g., `&1. Title A, Title B`). By default, selecting a workspace opens a secondary **Window Menu** for that workspace (this can be disabled in the config via `workspace_submenus`).
+- **Workspace Navigation**: In the default two-tier menu mode, selecting a workspace opens a secondary **Window Menu**.
+- **Switch windows**: In the Window Menu, selecting a window focuses it immediately (using its system HWND).
+- **Focus Workspace**: In the Window Menu, select "Focus Workspace" at the top to switch to the workspace without focusing a specific window.
+- **Global Hotkey**: Pressing the hotkey (default: `Alt+Shift+G`) cycles through monitors and opens the **Workspace Menu**.
+- **Keyboard Mnemonics**: Use digits (e.g., `1` after opening a menu) to quickly select workspaces or windows.
+- **Enable autostart**: Toggle the "Enable autostart" item in the Workspace Menu to have the app launch on logon.
+- **Quit**: Select "Quit" in the Workspace Menu to terminate the app.
 
 Logs go to stderr; the log level can be tuned with `KOMOREBI_TRAY_LOG`, e.g.
 `$env:KOMOREBI_TRAY_LOG = "debug"`.
@@ -76,6 +80,7 @@ If the file is missing or invalid, the app falls back to built-in defaults.
   },
   "menu": {
     "show_hotkey": "Ctrl+Alt+G",
+    "workspace_submenus": true,
     "max_title_length": 64,
     "max_combined_title_length": 96
   }
@@ -98,6 +103,7 @@ The app tracks Windows app mode (`AppsUseLightTheme`) and switches colors instan
   - **Keys**: `A`-`Z`, `0`-`9`, `F1`-`F12`.
   - **Examples**: `Ctrl+Shift+K`, `Alt+F1`, `Win+Alt+G`.
   - If you have multiple monitors, pressing the hotkey repeatedly will cycle the menu across each monitor's tray icon.
+- `workspace_submenus` (optional boolean, default `true`): If enabled, clicking a workspace in the main menu opens a secondary window-list menu. If disabled, clicking a workspace focuses it directly (legacy behavior).
 - `max_title_length` (optional integer, default `64`): Maximum length of an individual window title before it's ellipsized.
 - `max_combined_title_length` (optional integer, default `96`): Maximum length of the joined string of all window titles in a workspace menu item.
 
@@ -105,7 +111,7 @@ The app tracks Windows app mode (`AppsUseLightTheme`) and switches colors instan
 
 Early but functional. The MVP described in [`spec.md`](spec.md) is implemented end-to-end —
 renderer, komorebi event worker, per-monitor tray icons, right-click menu with the autostart
-toggle, single-instance guard, interactive tray menu, and a CI-built NSIS installer — and tagged as `v0.4.0`. See the
+toggle, single-instance guard, interactive tray menu, and a CI-built NSIS installer — and tagged as `v0.5.0`. See the
 [releases page](https://github.com/h0tk3y/komorebi-tray-grid/releases) for prebuilt binaries.
 Expect rough edges; bug reports and PRs are welcome.
 
