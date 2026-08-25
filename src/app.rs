@@ -348,7 +348,7 @@ fn build_menu_for_monitor(
 
                 let win_label = format!("{}{}", win_mnemonic, ellipsize(&win.title, max_title_length));
 
-                let win_item = MenuItem::with_id(
+                let win_item = CheckMenuItem::with_id(
                     MenuId::new(format!(
                         "win-h{}-{}-{}",
                         encode_monitor_id(&monitor.id),
@@ -357,6 +357,7 @@ fn build_menu_for_monitor(
                     )),
                     win_label,
                     true,
+                    win.focused,
                     None,
                 );
                 window_items.insert(
@@ -443,6 +444,7 @@ impl App {
 
                         let _ = self.tray.show_custom_menu(&monitor_id, win_menu);
                         self.clear_menu_lock();
+                        self.reconcile_tray();
                         return;
                     }
                 }
@@ -461,6 +463,7 @@ impl App {
                         tracing::error!(error = %e, "failed to send focus command");
                     }
                 }
+                self.reconcile_tray();
                 return;
             }
         }
@@ -537,6 +540,7 @@ impl App {
 
     /// Open the context menu for the monitor with the given id.
     pub fn show_menu_for_monitor(&mut self, monitor_id: &str) {
+        self.reconcile_tray();
         self.menu_opened_at = Some(std::time::Instant::now());
         crate::tray::MENU_VISIBLE.store(true, std::sync::atomic::Ordering::SeqCst);
         if let Err(e) = self.tray.show_menu(monitor_id) {
@@ -647,7 +651,7 @@ mod tests {
         let win_menu_0 = virtual_submenus.get(&0).unwrap();
         let win_labels_0: Vec<String> = win_menu_0.items()
             .iter()
-            .filter_map(|i| i.as_menuitem().map(|m| m.text()))
+            .filter_map(|i| i.as_check_menuitem().map(|m| m.text()))
             .collect();
         assert!(win_labels_0.contains(&"&1. Win1".to_string()));
 
@@ -792,5 +796,131 @@ mod tests {
         // The workspace item should still be in workspace_items for fallback focus
         let ws_item_id = MenuId::new(format!("ws-h{}-0", encode_monitor_id("m1")));
         assert!(workspace_items.contains_key(&ws_item_id));
+    }
+
+    #[test]
+    fn test_workspace_menu_checkmarks_consistent_after_submenu_interaction() {
+        let mut app = App::new(false, Theme::default(), 64, 96, true).unwrap();
+        let state = WorldState {
+            monitors: vec![MonitorState {
+                id: "m1".into(),
+                menu_workspaces: vec![
+                    WorkspaceMenuState {
+                        index: 0,
+                        focused: true,
+                        windows: vec![WindowMenuState {
+                            title: "Win1".into(),
+                            ..Default::default()
+                        }],
+                    },
+                    WorkspaceMenuState {
+                        index: 1,
+                        focused: false,
+                        windows: vec![WindowMenuState {
+                            title: "Win2".into(),
+                            ..Default::default()
+                        }],
+                    },
+                ],
+                ..Default::default()
+            }],
+        };
+
+        app.on_state_changed(state);
+
+        // Verify initial checkmark state: WS 0 is checked, WS 1 is unchecked.
+        let get_checks = |app: &App| -> Vec<(String, bool)> {
+            let menu = app.tray.menu("m1").expect("menu exists");
+            menu.items()
+                .iter()
+                .filter_map(|item| {
+                    item.as_check_menuitem()
+                        .map(|c| (c.text(), c.is_checked()))
+                })
+                .collect()
+        };
+
+        let initial_checks = get_checks(&app);
+        assert_eq!(initial_checks.len(), 3); // WS 0, WS 1, autostart
+        assert!(initial_checks[0].1, "WS 0 should be checked initially");
+        assert!(!initial_checks[1].1, "WS 1 should be unchecked initially");
+
+        // Simulate user clicking on WS 1
+        let ws1_id = MenuId::new(format!("ws-h{}-1", encode_monitor_id("m1")));
+        let mut control_flow = ControlFlow::Wait;
+        let mut autostart_toggle = |_| true;
+        let is_autostart_enabled = || false;
+
+        app.on_menu_event(
+            MenuEvent { id: ws1_id },
+            &mut control_flow,
+            &mut autostart_toggle,
+            &is_autostart_enabled,
+        );
+
+        // After the submenu interaction is done, the checkmark state MUST remain consistent:
+        // WS 0 is still checked, WS 1 is still unchecked.
+        let post_checks = get_checks(&app);
+        assert!(post_checks[0].1, "WS 0 must remain checked");
+        assert!(!post_checks[1].1, "WS 1 must remain unchecked");
+    }
+
+    #[test]
+    fn test_window_menu_checkmarks_for_active_window() {
+        let mut workspace_items = HashMap::new();
+        let mut window_items = HashMap::new();
+        let autostart_id = MenuId::new("autostart");
+        let quit_id = MenuId::new("quit");
+
+        let monitor = MonitorState {
+            id: "m1".into(),
+            menu_workspaces: vec![WorkspaceMenuState {
+                index: 0,
+                focused: true,
+                windows: vec![
+                    WindowMenuState {
+                        title: "Win A".into(),
+                        hwnd: 100,
+                        focused: false,
+                        ..Default::default()
+                    },
+                    WindowMenuState {
+                        title: "Win B".into(),
+                        hwnd: 200,
+                        focused: true,
+                        ..Default::default()
+                    },
+                ],
+            }],
+            ..Default::default()
+        };
+
+        let (_ws_menu, virtual_submenus) = build_menu_for_monitor(
+            &monitor,
+            &mut workspace_items,
+            &mut window_items,
+            autostart_id,
+            quit_id,
+            false,
+            64,
+            96,
+            true,
+        );
+
+        let win_menu = virtual_submenus.get(&0).expect("submenu 0 exists");
+        let win_checks: Vec<(String, bool)> = win_menu
+            .items()
+            .iter()
+            .filter_map(|i| {
+                i.as_check_menuitem()
+                    .map(|c| (c.text(), c.is_checked()))
+            })
+            .collect();
+
+        assert_eq!(win_checks.len(), 2);
+        assert_eq!(win_checks[0].0, "&1. Win A");
+        assert!(!win_checks[0].1, "Win A should not be checked");
+        assert_eq!(win_checks[1].0, "&2. Win B");
+        assert!(win_checks[1].1, "Win B should be checked");
     }
 }

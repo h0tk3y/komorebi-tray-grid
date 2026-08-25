@@ -33,7 +33,7 @@ Interacting with any tray icon allows you to:
 
 - **Switch workspaces**: Click the tray icon to open a menu listing all non-empty workspaces. Each workspace label includes a summary of its windows (e.g., `&1. Title A, Title B`). By default, selecting a workspace opens a secondary **Window Menu** for that workspace (this can be disabled in the config via `workspace_submenus`).
 - **Workspace Navigation**: In the default two-tier menu mode, selecting a workspace opens a secondary **Window Menu**.
-- **Switch windows**: In the Window Menu, selecting a window focuses it immediately (using its system HWND).
+- **Switch windows**: In the Window Menu, selecting a window focuses it immediately (using its system HWND). The currently active window on the workspace is marked with a native checkmark.
 - **Focus Workspace**: In the Window Menu, select "Focus Workspace" at the top to switch to the workspace without focusing a specific window.
 - **Global Hotkey**: Pressing the hotkey (default: `Alt+Shift+G`) cycles through monitors and opens the **Workspace Menu**.
 - **Keyboard Mnemonics**: Use digits (e.g., `1` after opening a menu) to quickly select workspaces or windows.
@@ -111,7 +111,7 @@ The app tracks Windows app mode (`AppsUseLightTheme`) and switches colors instan
 
 Early but functional. The MVP described in [`spec.md`](spec.md) is implemented end-to-end —
 renderer, komorebi event worker, per-monitor tray icons, right-click menu with the autostart
-toggle, single-instance guard, interactive tray menu, and a CI-built NSIS installer — and tagged as `v0.5.0`. See the
+toggle, single-instance guard, interactive tray menu, and a CI-built NSIS installer — and tagged as `v0.6.0`. See the
 [releases page](https://github.com/h0tk3y/komorebi-tray-grid/releases) for prebuilt binaries.
 Expect rough edges; bug reports and PRs are welcome.
 

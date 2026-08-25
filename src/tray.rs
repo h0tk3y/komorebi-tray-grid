@@ -145,6 +145,11 @@ impl TrayManager {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn menu(&self, monitor_id: &str) -> Option<&Menu> {
+        self.menus.get(monitor_id)
+    }
+
     /// Show a specific menu (e.g. a virtual submenu) for the given monitor ID.
     pub fn show_custom_menu(&self, monitor_id: &str, menu: &Menu) -> Result<()> {
         self.show_menu_internal(monitor_id, menu)

@@ -34,7 +34,7 @@ The tray icon provides a way to interact with workspaces and windows using a two
 * **Window Menu**:
   * **Focus Workspace**: An item at the top to switch to the workspace immediately. It is automatically highlighted when the menu opens so it can be triggered by pressing Enter.
   * (Separator)
-  * **Window Items**: A list of windows in that workspace. Selecting a window item switches to the workspace and focuses that specific window (using its system HWND).
+  * **Window Items**: A list of windows in that workspace. Selecting a window item switches to the workspace and focuses that specific window (using its system HWND). The currently active window in the workspace is marked with a native checkmark.
   * Each window item has a keyboard mnemonic (digits `&1.` through `&9.`).
 * **Hotkey Support**: The global hotkey cycle shows the **Workspace Menu** for the target monitor.
 * **Autostart**: An "Enable autostart" toggle.

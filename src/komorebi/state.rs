@@ -42,6 +42,7 @@ pub struct WindowMenuState {
     pub title: String,
     pub exe: String,
     pub hwnd: usize,
+    pub focused: bool,
 }
 
 /// Snapshot of every monitor known to komorebi, in komorebi's reported order.
@@ -130,9 +131,17 @@ fn project_workspace(index: usize, focused_workspace: usize, ws: &types::Workspa
 fn workspace_windows(ws: &types::Workspace) -> Vec<WindowMenuState> {
     let mut windows = Vec::new();
 
-    for container in &ws.containers.elements {
-        for window in &container.windows.elements {
-            if let Some(w) = project_window(window) {
+    let has_maximized = ws.maximized_window.is_some();
+    let has_monocle = ws.monocle_container.is_some();
+
+    for (ci, container) in ws.containers.elements.iter().enumerate() {
+        let is_focused_container = ci == ws.containers.focused;
+        for (wi, window) in container.windows.elements.iter().enumerate() {
+            let is_focused = !has_maximized
+                && !has_monocle
+                && is_focused_container
+                && wi == container.windows.focused;
+            if let Some(w) = project_window(window, is_focused) {
                 windows.push(w);
             }
         }
@@ -140,15 +149,19 @@ fn workspace_windows(ws: &types::Workspace) -> Vec<WindowMenuState> {
 
     match &ws.floating_windows {
         types::WindowCollection::Ring(ring) => {
-            for window in &ring.elements {
-                if let Some(w) = project_window(window) {
+            for (wi, window) in ring.elements.iter().enumerate() {
+                let is_focused = !has_maximized
+                    && !has_monocle
+                    && ws.containers.elements.is_empty()
+                    && wi == ring.focused;
+                if let Some(w) = project_window(window, is_focused) {
                     windows.push(w);
                 }
             }
         }
         types::WindowCollection::Array(arr) => {
             for window in arr {
-                if let Some(w) = project_window(window) {
+                if let Some(w) = project_window(window, false) {
                     windows.push(w);
                 }
             }
@@ -157,15 +170,16 @@ fn workspace_windows(ws: &types::Workspace) -> Vec<WindowMenuState> {
     }
 
     if let Some(container) = &ws.monocle_container {
-        for window in &container.windows.elements {
-            if let Some(w) = project_window(window) {
+        for (wi, window) in container.windows.elements.iter().enumerate() {
+            let is_focused = !has_maximized && wi == container.windows.focused;
+            if let Some(w) = project_window(window, is_focused) {
                 windows.push(w);
             }
         }
     }
 
     if let Some(window) = &ws.maximized_window {
-        if let Some(w) = project_window(window) {
+        if let Some(w) = project_window(window, true) {
             windows.push(w);
         }
     }
@@ -173,7 +187,7 @@ fn workspace_windows(ws: &types::Workspace) -> Vec<WindowMenuState> {
     windows
 }
 
-fn project_window(window: &types::Window) -> Option<WindowMenuState> {
+fn project_window(window: &types::Window, focused: bool) -> Option<WindowMenuState> {
     let title = window.title.trim();
     if title.is_empty() {
         None
@@ -182,6 +196,7 @@ fn project_window(window: &types::Window) -> Option<WindowMenuState> {
             title: title.to_string(),
             exe: window.exe.clone(),
             hwnd: window.hwnd,
+            focused,
         })
     }
 }
@@ -453,5 +468,71 @@ mod tests {
         let cell = w.monitors[0].cells[0];
         assert_eq!(cell.window_count, 6);
         assert!(cell.full_screen);
+    }
+
+    #[test]
+    fn workspace_windows_active_window_flag() {
+        let w = parse(json!({
+            "monitors": { "elements": [{
+                "device_id": "DEV-1",
+                "workspaces": {
+                    "elements": [
+                        {
+                            "containers": {
+                                "elements": [
+                                    { "windows": { "elements": [{ "hwnd": 1, "title": "Win 1" }], "focused": 0 } },
+                                    { "windows": { "elements": [{ "hwnd": 2, "title": "Win 2" }, { "hwnd": 3, "title": "Win 3" }], "focused": 1 } }
+                                ],
+                                "focused": 1
+                            },
+                            "floating_windows": { "elements": [], "focused": 0 },
+                            "monocle_container": null,
+                            "maximized_window": null
+                        },
+                        {
+                            "containers": {
+                                "elements": [
+                                    { "windows": { "elements": [{ "hwnd": 10, "title": "Win 10" }], "focused": 0 } }
+                                ],
+                                "focused": 0
+                            },
+                            "floating_windows": { "elements": [], "focused": 0 },
+                            "monocle_container": {
+                                "windows": { "elements": [{ "hwnd": 20, "title": "Monocle Win" }], "focused": 0 }
+                            },
+                            "maximized_window": null
+                        },
+                        {
+                            "containers": {
+                                "elements": [
+                                    { "windows": { "elements": [{ "hwnd": 30, "title": "Win 30" }], "focused": 0 } }
+                                ],
+                                "focused": 0
+                            },
+                            "floating_windows": { "elements": [], "focused": 0 },
+                            "monocle_container": null,
+                            "maximized_window": { "hwnd": 40, "title": "Maximized Win" }
+                        }
+                    ],
+                    "focused": 0
+                }
+            }], "focused": 0 }
+        }));
+
+        let ws0 = &w.monitors[0].menu_workspaces[0];
+        assert_eq!(ws0.windows.len(), 3);
+        assert!(!ws0.windows[0].focused); // Win 1 (container 0)
+        assert!(!ws0.windows[1].focused); // Win 2 (container 1, index 0)
+        assert!(ws0.windows[2].focused);  // Win 3 (container 1, focused index 1)
+
+        let ws1 = &w.monitors[0].menu_workspaces[1];
+        assert_eq!(ws1.windows.len(), 2);
+        assert!(!ws1.windows[0].focused); // Win 10
+        assert!(ws1.windows[1].focused);  // Monocle Win
+
+        let ws2 = &w.monitors[0].menu_workspaces[2];
+        assert_eq!(ws2.windows.len(), 2);
+        assert!(!ws2.windows[0].focused); // Win 30
+        assert!(ws2.windows[1].focused);  // Maximized Win
     }
 }
