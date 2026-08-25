@@ -7,9 +7,12 @@
 
 use std::collections::HashMap;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+#[cfg(not(test))]
 use windows::Win32::Foundation::HWND;
+#[cfg(not(test))]
 use windows::Win32::UI::Input::KeyboardAndMouse::{keybd_event, KEYEVENTF_KEYUP, VK_DOWN};
-use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+#[cfg(not(test))]
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
 
 use anyhow::Result;
 use komorebi_client::SocketMessage;
@@ -20,6 +23,15 @@ use crate::komorebi::state::{MonitorState, WorldState};
 use crate::render::Theme;
 use crate::tray::TrayManager;
 use crate::utils::ellipsize;
+
+/// Pending window focus request awaiting workspace switch completion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingFocus {
+    pub monitor_id: String,
+    pub workspace_index: usize,
+    pub hwnd: usize,
+    pub requested_at: std::time::Instant,
+}
 
 /// The full event-loop-bound application.
 pub struct App {
@@ -42,6 +54,8 @@ pub struct App {
     menu_opened_at: Option<std::time::Instant>,
     /// Buffers the latest world state received while the menu was open.
     pending_world: Option<WorldState>,
+    /// Pending window focus request awaiting workspace switch completion.
+    pending_focus: Option<PendingFocus>,
 }
 
 impl App {
@@ -67,6 +81,7 @@ impl App {
             virtual_submenus: HashMap::new(),
             menu_opened_at: None,
             pending_world: None,
+            pending_focus: None,
         })
     }
 
@@ -93,6 +108,7 @@ impl App {
         }
 
         self.world = new_state;
+        self.check_pending_focus();
         self.reconcile_tray();
     }
 
@@ -198,9 +214,81 @@ impl App {
         if let Some(pending) = self.pending_world.take() {
             tracing::debug!("applying pending state after menu lock cleared");
             self.world = pending;
+            self.check_pending_focus();
             self.reconcile_tray();
         }
     }
+
+    /// Checks whether the specified monitor and workspace are currently active.
+    pub fn is_active_workspace(&self, monitor_id: &str, ws_idx: usize) -> bool {
+        self.world.monitor(monitor_id).map_or(false, |m| {
+            m.active && m.menu_workspaces.iter().any(|ws| ws.index == ws_idx && ws.focused)
+        })
+    }
+
+    fn check_pending_focus(&mut self) {
+        if let Some(pending) = &self.pending_focus {
+            if pending.requested_at.elapsed() > std::time::Duration::from_secs(2) {
+                tracing::warn!(
+                    monitor = %pending.monitor_id,
+                    workspace = pending.workspace_index,
+                    hwnd = pending.hwnd,
+                    "pending window focus expired"
+                );
+                self.pending_focus = None;
+                return;
+            }
+
+            if self.is_active_workspace(&pending.monitor_id, pending.workspace_index) {
+                tracing::info!(
+                    monitor = %pending.monitor_id,
+                    workspace = pending.workspace_index,
+                    hwnd = pending.hwnd,
+                    "target workspace active; applying pending window focus"
+                );
+                let hwnd = pending.hwnd;
+                self.pending_focus = None;
+                focus_window_resilient(hwnd);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_focus(&self) -> Option<&PendingFocus> {
+        self.pending_focus.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_pending_focus_for_test(&mut self, pending: Option<PendingFocus>) {
+        self.pending_focus = pending;
+    }
+}
+
+#[cfg(not(test))]
+fn focus_window_resilient(hwnd: usize) {
+    unsafe {
+        let _ = SetForegroundWindow(HWND(hwnd as _));
+    }
+    std::thread::spawn(move || {
+        let target = HWND(hwnd as _);
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_millis(200);
+        let poll_interval = std::time::Duration::from_millis(15);
+        while start.elapsed() < timeout {
+            unsafe {
+                if GetForegroundWindow() == target {
+                    break;
+                }
+                let _ = SetForegroundWindow(target);
+            }
+            std::thread::sleep(poll_interval);
+        }
+    });
+}
+
+#[cfg(test)]
+fn focus_window_resilient(_hwnd: usize) {
+    // In tests, avoid manipulating real OS window foreground state.
 }
 
 /// Parse a workspace menu-item id back into its stable monitor identity and
@@ -426,23 +514,26 @@ impl App {
                 .or_else(|| parse_workspace_menu_id(event.id.as_ref()))
             {
                 if let Some(submenus) = self.virtual_submenus.get(&monitor_id) {
-                    if let Some(win_menu) = submenus.get(&ws_idx) {
+                    if let Some(_win_menu) = submenus.get(&ws_idx) {
                         tracing::debug!(monitor = %monitor_id, workspace = ws_idx, "showing virtual submenu");
                         // We must set the lock BEFORE showing the menu
                         self.menu_opened_at = Some(std::time::Instant::now());
                         crate::tray::MENU_VISIBLE.store(true, std::sync::atomic::Ordering::SeqCst);
 
-                        // Spawn a thread to select the first item ("Focus Workspace")
-                        // so it can be triggered by pressing Enter immediately.
-                        std::thread::spawn(|| {
-                            std::thread::sleep(std::time::Duration::from_millis(50));
-                            unsafe {
-                                keybd_event(VK_DOWN.0 as u8, 0, Default::default(), 0);
-                                keybd_event(VK_DOWN.0 as u8, 0, KEYEVENTF_KEYUP, 0);
-                            }
-                        });
+                        #[cfg(not(test))]
+                        {
+                            // Spawn a thread to select the first item ("Focus Workspace")
+                            // so it can be triggered by pressing Enter immediately.
+                            std::thread::spawn(|| {
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                unsafe {
+                                    keybd_event(VK_DOWN.0 as u8, 0, Default::default(), 0);
+                                    keybd_event(VK_DOWN.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+                                }
+                            });
 
-                        let _ = self.tray.show_custom_menu(&monitor_id, win_menu);
+                            let _ = self.tray.show_custom_menu(&monitor_id, _win_menu);
+                        }
                         self.clear_menu_lock();
                         self.reconcile_tray();
                         return;
@@ -508,23 +599,34 @@ impl App {
                 Some((mid, wid, hwnd))
             })
         {
-            if let Some(monitor_index) = self.world.monitors.iter().position(|m| m.id == monitor_id)
+            if self.is_active_workspace(&monitor_id, ws_idx) {
+                tracing::info!(
+                    monitor = %monitor_id,
+                    workspace = ws_idx,
+                    hwnd = %win_hwnd,
+                    "focusing window on active workspace"
+                );
+                self.pending_focus = None;
+                focus_window_resilient(win_hwnd);
+            } else if let Some(monitor_index) = self.world.monitors.iter().position(|m| m.id == monitor_id)
             {
                 tracing::info!(
                     monitor = %monitor_id,
                     monitor_index,
                     workspace = ws_idx,
                     hwnd = %win_hwnd,
-                    "focusing window via menu"
+                    "requesting workspace switch and pending focus for window"
                 );
-                // First switch to the monitor and workspace
-                let ws_msg = SocketMessage::FocusMonitorWorkspaceNumber(monitor_index, ws_idx);
-                let _ = send_command(ws_msg);
+                self.pending_focus = Some(PendingFocus {
+                    monitor_id: monitor_id.clone(),
+                    workspace_index: ws_idx,
+                    hwnd: win_hwnd,
+                    requested_at: std::time::Instant::now(),
+                });
 
-                // Then focus the specific window by HWND. Komorebi will see this
-                // via its FocusChange event handler and update its state.
-                unsafe {
-                    let _ = SetForegroundWindow(HWND(win_hwnd as _));
+                let ws_msg = SocketMessage::FocusMonitorWorkspaceNumber(monitor_index, ws_idx);
+                if let Err(e) = send_command(ws_msg) {
+                    tracing::error!(error = %e, "failed to send focus command");
                 }
             }
             return;
@@ -845,11 +947,16 @@ mod tests {
         assert!(initial_checks[0].1, "WS 0 should be checked initially");
         assert!(!initial_checks[1].1, "WS 1 should be unchecked initially");
 
-        // Simulate user clicking on WS 1
+        // Simulate user clicking on WS 1 (which toggles the item in the native menu)
         let ws1_id = MenuId::new(format!("ws-h{}-1", encode_monitor_id("m1")));
         let mut control_flow = ControlFlow::Wait;
         let mut autostart_toggle = |_| true;
         let is_autostart_enabled = || false;
+
+        let menu = app.tray.menu("m1").expect("menu exists");
+        if let Some(item) = menu.items().get(1).and_then(|i| i.as_check_menuitem()) {
+            item.set_checked(true);
+        }
 
         app.on_menu_event(
             MenuEvent { id: ws1_id },
@@ -922,5 +1029,208 @@ mod tests {
         assert!(!win_checks[0].1, "Win A should not be checked");
         assert_eq!(win_checks[1].0, "&2. Win B");
         assert!(win_checks[1].1, "Win B should be checked");
+    }
+
+    #[test]
+    fn test_active_workspace_fast_path_focus() {
+        let mut app = App::new(false, Theme::default(), 64, 96, true).unwrap();
+        let state = WorldState {
+            monitors: vec![MonitorState {
+                id: "m1".into(),
+                active: true,
+                menu_workspaces: vec![
+                    WorkspaceMenuState {
+                        index: 0,
+                        focused: true,
+                        windows: vec![WindowMenuState {
+                            title: "Win 1".into(),
+                            hwnd: 100,
+                            ..Default::default()
+                        }],
+                    },
+                    WorkspaceMenuState {
+                        index: 1,
+                        focused: false,
+                        windows: vec![WindowMenuState {
+                            title: "Win 2".into(),
+                            hwnd: 200,
+                            ..Default::default()
+                        }],
+                    },
+                ],
+                ..Default::default()
+            }],
+        };
+
+        app.on_state_changed(state);
+
+        // Click window on workspace 0 (currently active)
+        let win_id = MenuId::new(format!("win-h{}-0-0", encode_monitor_id("m1")));
+        let mut control_flow = ControlFlow::Wait;
+        let mut autostart_toggle = |_| true;
+        let is_autostart_enabled = || false;
+
+        app.on_menu_event(
+            MenuEvent { id: win_id },
+            &mut control_flow,
+            &mut autostart_toggle,
+            &is_autostart_enabled,
+        );
+
+        // Fast-path: no pending focus registered because workspace was already active
+        assert!(app.pending_focus().is_none());
+    }
+
+    #[test]
+    fn test_inactive_workspace_deferred_focus_lifecycle() {
+        let mut app = App::new(false, Theme::default(), 64, 96, true).unwrap();
+        let state = WorldState {
+            monitors: vec![MonitorState {
+                id: "m1".into(),
+                active: true,
+                menu_workspaces: vec![
+                    WorkspaceMenuState {
+                        index: 0,
+                        focused: true,
+                        windows: vec![WindowMenuState {
+                            title: "Win 1".into(),
+                            hwnd: 100,
+                            ..Default::default()
+                        }],
+                    },
+                    WorkspaceMenuState {
+                        index: 1,
+                        focused: false,
+                        windows: vec![WindowMenuState {
+                            title: "Win 2".into(),
+                            hwnd: 200,
+                            ..Default::default()
+                        }],
+                    },
+                ],
+                ..Default::default()
+            }],
+        };
+
+        app.on_state_changed(state);
+
+        // Click window on workspace 1 (inactive)
+        let win_id = MenuId::new(format!("win-h{}-1-0", encode_monitor_id("m1")));
+        let mut control_flow = ControlFlow::Wait;
+        let mut autostart_toggle = |_| true;
+        let is_autostart_enabled = || false;
+
+        app.on_menu_event(
+            MenuEvent { id: win_id },
+            &mut control_flow,
+            &mut autostart_toggle,
+            &is_autostart_enabled,
+        );
+
+        // Deferred focus: pending_focus is set for workspace 1 and hwnd 200
+        let pending = app.pending_focus().expect("pending focus should be registered");
+        assert_eq!(pending.monitor_id, "m1");
+        assert_eq!(pending.workspace_index, 1);
+        assert_eq!(pending.hwnd, 200);
+
+        // Simulate komorebi state update when workspace 1 becomes focused
+        let state2 = WorldState {
+            monitors: vec![MonitorState {
+                id: "m1".into(),
+                active: true,
+                menu_workspaces: vec![
+                    WorkspaceMenuState {
+                        index: 0,
+                        focused: false,
+                        windows: vec![WindowMenuState {
+                            title: "Win 1".into(),
+                            hwnd: 100,
+                            ..Default::default()
+                        }],
+                    },
+                    WorkspaceMenuState {
+                        index: 1,
+                        focused: true,
+                        windows: vec![WindowMenuState {
+                            title: "Win 2".into(),
+                            hwnd: 200,
+                            ..Default::default()
+                        }],
+                    },
+                ],
+                ..Default::default()
+            }],
+        };
+
+        app.on_state_changed(state2);
+
+        // Once target workspace becomes active, pending_focus is consumed/cleared
+        assert!(app.pending_focus().is_none());
+    }
+
+    #[test]
+    fn test_pending_focus_expiration() {
+        let mut app = App::new(false, Theme::default(), 64, 96, true).unwrap();
+        let state = WorldState {
+            monitors: vec![MonitorState {
+                id: "m1".into(),
+                active: true,
+                menu_workspaces: vec![
+                    WorkspaceMenuState {
+                        index: 0,
+                        focused: true,
+                        windows: vec![WindowMenuState {
+                            title: "Win 1".into(),
+                            hwnd: 100,
+                            ..Default::default()
+                        }],
+                    },
+                ],
+                ..Default::default()
+            }],
+        };
+
+        app.on_state_changed(state);
+
+        // Set pending focus that was requested 3 seconds ago (exceeding 2s timeout)
+        app.set_pending_focus_for_test(Some(PendingFocus {
+            monitor_id: "m1".into(),
+            workspace_index: 1,
+            hwnd: 200,
+            requested_at: std::time::Instant::now() - std::time::Duration::from_secs(3),
+        }));
+
+        let state_update = WorldState {
+            monitors: vec![MonitorState {
+                id: "m1".into(),
+                active: true,
+                menu_workspaces: vec![
+                    WorkspaceMenuState {
+                        index: 0,
+                        focused: true,
+                        windows: vec![WindowMenuState {
+                            title: "Win 1".into(),
+                            hwnd: 100,
+                            ..Default::default()
+                        }],
+                    },
+                    WorkspaceMenuState {
+                        index: 1,
+                        focused: false,
+                        windows: vec![WindowMenuState {
+                            title: "Win 2".into(),
+                            hwnd: 200,
+                            ..Default::default()
+                        }],
+                    },
+                ],
+                ..Default::default()
+            }],
+        };
+
+        app.on_state_changed(state_update);
+
+        // Expired focus should be discarded
+        assert!(app.pending_focus().is_none());
     }
 }
